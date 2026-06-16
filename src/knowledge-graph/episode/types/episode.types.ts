@@ -77,7 +77,7 @@ const MessageEpisodeInputSchema = EpisodeInputBaseSchema.extend({
     .describe('Conversation turns in chronological order.'),
 });
 
-// prepareChunks in extraction/content-chunking.ts relies on this refine
+// prepareChunks in episode/content-chunking.ts relies on this refine
 const JsonEpisodeInputSchema = EpisodeInputBaseSchema.extend({
   content: z
     .string()

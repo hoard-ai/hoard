@@ -18,6 +18,7 @@ import {
   buildDedupeNodesValidator,
   NodeResolutionsSchema,
 } from '../prompts';
+import { selectChunkText } from '../prompts/text-utils';
 import { EntityNodeRepository } from '../repository/repositories';
 import { SearchBySimilarityParamsSchema, SearchByTextParamsSchema } from '../types';
 import {
@@ -91,8 +92,9 @@ export class NodeResolutionService {
   async resolveNodes(
     model: BaseChatModel,
     episode: EpisodicNode,
+    chunks: string[],
+    chunkIndicesByNodeId: Map<Uuid, Set<number>>,
     extractedNodes: EntityNode[],
-    existingNodes: EntityNode[],
     previousEpisodes: EpisodicNode[] = [],
     customInstructions?: string,
     ctx?: LlmContext,
@@ -100,8 +102,9 @@ export class NodeResolutionService {
     const { metrics: _m, ...rest } = await this.resolveNodesImpl(
       model,
       episode,
+      chunks,
+      chunkIndicesByNodeId,
       extractedNodes,
-      existingNodes,
       previousEpisodes,
       customInstructions,
       ctx,
@@ -113,12 +116,17 @@ export class NodeResolutionService {
   private async resolveNodesImpl(
     model: BaseChatModel,
     episode: EpisodicNode,
+    chunks: string[],
+    chunkIndicesByNodeId: Map<Uuid, Set<number>>,
     extractedNodes: EntityNode[],
-    existingNodes: EntityNode[],
     previousEpisodes: EpisodicNode[] = [],
     customInstructions?: string,
     ctx?: LlmContext,
   ): Promise<NodeResolutionResult & { metrics: SpanMetrics }> {
+    const existingNodes = extractedNodes.length
+      ? await this.collectCandidates(extractedNodes, episode.graphId)
+      : [];
+
     const idMap = new Map<Uuid, Uuid>();
     const duplicatePairs: Array<{
       extractedId: Uuid;
@@ -215,8 +223,24 @@ export class NodeResolutionService {
         name,
         labels,
       }));
+
+      // Episode text = the chunks the resolved nodes came from (union across the
+      // batch). Every extracted node carries originating chunk indices, so a miss
+      // is a bookkeeping bug (mirrors the throw in nodeContext / summarizeNodes).
+      const batchChunkIndices = new Set<number>();
+      for (const { entityId } of llmExtractedWithIdx) {
+        const indices = chunkIndicesByNodeId.get(entityId);
+        if (!indices) {
+          throw new Error(
+            `resolveNodes: extracted node ${entityId} has no originating chunk indices`,
+          );
+        }
+        for (const idx of indices) batchChunkIndices.add(idx);
+      }
+      const episodeText = selectChunkText(batchChunkIndices, chunks);
+
       const messages = buildDedupeNodesMessages({
-        episode,
+        episode: { ...episode, content: episodeText },
         previousEpisodes,
         extractedNodes: extractedForPrompt,
         candidateNodes: allCandidates,
@@ -261,6 +285,7 @@ export class NodeResolutionService {
       resolvedNodes,
       idMap,
       duplicatePairs,
+      candidates: existingNodes,
       metrics: {
         'episode.id': episode.id,
         'extracted.count': extractedNodes.length,

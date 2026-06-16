@@ -7,6 +7,7 @@
     "^.+\\.ts$": "ts-jest"
   },
   "moduleNameMapper": {
+    "^(\\.{1,2}/.*)\\.js$": "$1",
     "^@test/(.*)$": "<rootDir>/$1",
     "^@/(.*)$": "<rootDir>/../src/$1",
     "^@generated/(.*)$": "<rootDir>/../generated/$1"

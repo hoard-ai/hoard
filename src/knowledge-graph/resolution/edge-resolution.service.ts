@@ -19,6 +19,7 @@ import {
   buildDedupeEdgesValidator,
   EdgeDedupeSchema,
 } from '../prompts';
+import { selectChunkText } from '../prompts/text-utils';
 import { EntityEdgeRepository } from '../repository/repositories';
 import { SearchBySimilarityParamsSchema, SearchByTextParamsSchema } from '../types';
 import {
@@ -29,7 +30,7 @@ import {
   MAX_KEYWORD_CANDIDATES,
   normalizeString,
 } from './resolution-utils';
-import { EdgeResolutionResult } from './types';
+import { EdgeChunkSources, EdgeResolutionResult } from './types';
 
 @Injectable()
 export class EdgeResolutionService {
@@ -37,6 +38,28 @@ export class EdgeResolutionService {
     private readonly edgeRepo: EntityEdgeRepository,
     @Inject(LLM_TRACER) private readonly llmTracer: LlmTracer,
   ) {}
+
+  /* Builds a synthetic episode whose content is scoped to the chunks the edge
+   * came from - resolved against its ORIGIN episode (chunkSources is qualified by
+   * episodeIndex), so a cross-episode-merged edge uses the right chunk array. */
+  private episodeForChunks(
+    episodes: EpisodicNode[],
+    chunksPerEpisode: string[][],
+    chunkSources: EdgeChunkSources,
+    edgeId: Uuid,
+  ): EpisodicNode {
+    const source = chunkSources.get(edgeId);
+    if (!source) {
+      throw new Error(
+        `episodeForChunks: edge ${edgeId} has no originating chunk indices`,
+      );
+    }
+    const { episodeIndex, indices } = source;
+    return {
+      ...episodes[episodeIndex],
+      content: selectChunkText(indices, chunksPerEpisode[episodeIndex]),
+    };
+  }
 
   async collectCandidates(edges: EntityEdge[], graphId: Uuid): Promise<EntityEdge[]> {
     const { candidates } = await this.collectCandidatesImpl(edges, graphId);
@@ -95,9 +118,10 @@ export class EdgeResolutionService {
 
   async resolveEdges(
     model: BaseChatModel,
-    episode: EpisodicNode,
+    episodes: EpisodicNode[],
+    chunksPerEpisode: string[][],
+    chunkSources: EdgeChunkSources,
     extractedEdges: EntityEdge[],
-    existingEdges: EntityEdge[],
     idMap: Map<Uuid, Uuid>,
     referenceTime: Date,
     previousEpisodes: EpisodicNode[] = [],
@@ -106,9 +130,10 @@ export class EdgeResolutionService {
   ): Promise<EdgeResolutionResult> {
     const { metrics: _m, ...rest } = await this.resolveEdgesImpl(
       model,
-      episode,
+      episodes,
+      chunksPerEpisode,
+      chunkSources,
       extractedEdges,
-      existingEdges,
       idMap,
       referenceTime,
       previousEpisodes,
@@ -121,9 +146,10 @@ export class EdgeResolutionService {
   @Span('edgeResolution', { onResult: metricsOnResult })
   private async resolveEdgesImpl(
     model: BaseChatModel,
-    episode: EpisodicNode,
+    episodes: EpisodicNode[],
+    chunksPerEpisode: string[][],
+    chunkSources: EdgeChunkSources,
     extractedEdges: EntityEdge[],
-    existingEdges: EntityEdge[],
     idMap: Map<Uuid, Uuid>,
     referenceTime: Date,
     previousEpisodes: EpisodicNode[] = [],
@@ -136,6 +162,15 @@ export class EdgeResolutionService {
       sourceNodeId: idMap.get(e.sourceNodeId) ?? e.sourceNodeId,
       targetNodeId: idMap.get(e.targetNodeId) ?? e.targetNodeId,
     }));
+    // resolveEdges is invoked per origin episode, so every edge here shares one
+    // graphId. collectCandidates and the per-edge searches below rely on this
+    if (new Set(remapped.map((e) => e.graphId)).size > 1) {
+      throw new Error('resolveEdges: edges span multiple graphIds');
+    }
+    // Candidates use the remapped (canonical) endpoints for getBetweenNodes.
+    const existingEdges = remapped.length
+      ? await this.collectCandidates(remapped, remapped[0].graphId)
+      : [];
 
     // Step 2: Intra-batch dedup - same endpoints + same normalized fact → keep first, merge episodes
     const deduped: EntityEdge[] = [];
@@ -148,14 +183,16 @@ export class EdgeResolutionService {
           normalizeString(d.fact) === normalizedFact,
       );
       if (existing) {
-        // Merge episodes into the first occurrence
+        // Merge episodes into the first occurrence. Chunk sources stay keyed by
+        // their own edge id (qualified by origin episode), so the kept edge
+        // selects its own episode text - no union needed.
         for (const ep of edge.episodes) {
           if (!existing.episodes.includes(ep)) {
             existing.episodes.push(ep);
           }
         }
       } else {
-        deduped.push({ ...edge });
+        deduped.push(edge);
       }
     }
 
@@ -167,7 +204,7 @@ export class EdgeResolutionService {
     for (const edge of deduped) {
       // Find same-endpoint existing edges (same direction only). Reversed-direction
       // duplicates are left to cosine/keyword retrieval to surface as similar-topic
-      // candidates - the prompt no longer reasons about endpoint direction.
+      // candidates - the prompt does not reason about endpoint direction.
       const endpointEdges = existingEdges.filter(
         (e) =>
           e.sourceNodeId === edge.sourceNodeId && e.targetNodeId === edge.targetNodeId,
@@ -218,7 +255,7 @@ export class EdgeResolutionService {
         edge,
         endpointEdges,
         similarEdges,
-        episode,
+        this.episodeForChunks(episodes, chunksPerEpisode, chunkSources, edge.id),
         previousEpisodes,
         referenceTime,
         customInstructions,
@@ -250,15 +287,17 @@ export class EdgeResolutionService {
         resolvedEdges.push(edge);
         newEdges.push(edge);
       } else {
-        // Append this episode's ID to the matching existing endpoint edge(s)
-        // and include them in resolvedEdges so they are re-saved with updated episodes.
+        // Append the resolved edge's originating episode(s) to the matching
+        // existing endpoint edge(s) and include them in resolvedEdges so they are
+        // re-saved with updated episodes. Using edge.episodes (not a single batch
+        // episode) stays correct when the list holds a cross-episode-merged edge.
         // Mirrors Python edge_operations.py:523-524 and 581-582.
         for (const idx of dedupe.duplicateFacts) {
           const existingEdge = idxToEdge.get(idx)!;
 
           if (resolvedExistingIds.has(existingEdge.id)) continue;
-          if (!existingEdge.episodes.includes(episode.id)) {
-            existingEdge.episodes.push(episode.id);
+          for (const ep of edge.episodes) {
+            if (!existingEdge.episodes.includes(ep)) existingEdge.episodes.push(ep);
           }
           resolvedEdges.push(existingEdge);
           resolvedExistingIds.add(existingEdge.id);
@@ -310,7 +349,7 @@ export class EdgeResolutionService {
       invalidatedEdges,
       newEdges,
       metrics: {
-        'episode.id': episode.id,
+        'episodes.count': episodes.length,
         'extracted.count': extractedEdges.length,
         'existing.count': existingEdges.length,
         'resolved.count': resolvedEdges.length,
@@ -325,25 +364,29 @@ export class EdgeResolutionService {
   // episodes in the same batch as candidates and let the LLM identify
   // duplicates. Without this, two episodes mentioning the same fact would each
   // persist a separate row because per-episode resolution only consults the
-  // live graph. Returns deduped per-episode lists where collapsed duplicates
-  // are replaced with a single canonical edge whose `episodes` field is the
-  // union of the originating episode IDs.
+  // live graph. Returns the flat set of distinct canonical edges (collapsed
+  // duplicates dropped) whose `episodes` field is the union of the originating
+  // episode IDs. The caller re-partitions by origin episode for resolution.
   async dedupeAcrossBatch(
     model: BaseChatModel,
     edgesPerEpisode: EntityEdge[][],
     episodes: EpisodicNode[],
+    chunksPerEpisode: string[][],
+    chunkSources: EdgeChunkSources,
     previousEpisodesPerEpisode: EpisodicNode[][],
     customInstructions?: string,
     ctx?: LlmContext,
-  ): Promise<EntityEdge[][]> {
+  ): Promise<EntityEdge[]> {
     return this.dedupeAcrossBatchImpl(
       model,
       edgesPerEpisode,
       episodes,
+      chunksPerEpisode,
+      chunkSources,
       previousEpisodesPerEpisode,
       customInstructions,
       ctx,
-    ).then((r) => r.deduped);
+    ).then((r) => r.canonicalEdges);
   }
 
   @Span('dedupeAcrossBatch', { onResult: metricsOnResult })
@@ -351,10 +394,12 @@ export class EdgeResolutionService {
     model: BaseChatModel,
     edgesPerEpisode: EntityEdge[][],
     episodes: EpisodicNode[],
+    chunksPerEpisode: string[][],
+    chunkSources: EdgeChunkSources,
     previousEpisodesPerEpisode: EpisodicNode[][],
     customInstructions: string | undefined,
     ctx: LlmContext | undefined,
-  ): Promise<{ deduped: EntityEdge[][]; metrics: SpanMetrics }> {
+  ): Promise<{ canonicalEdges: EntityEdge[]; metrics: SpanMetrics }> {
     const allEdges = edgesPerEpisode.flat();
     const baseMetrics: SpanMetrics = {
       'episodes.count': episodes.length,
@@ -362,7 +407,10 @@ export class EdgeResolutionService {
     };
 
     if (allEdges.length < 2) {
-      return { deduped: edgesPerEpisode, metrics: { ...baseMetrics, 'pairs.found': 0 } };
+      return {
+        canonicalEdges: allEdges,
+        metrics: { ...baseMetrics, 'pairs.found': 0 },
+      };
     }
 
     // Owner index: which episode each edge came from. Edge IDs are unique
@@ -417,7 +465,7 @@ export class EdgeResolutionService {
           t.edge,
           t.endpointEdges,
           t.similarEdges,
-          episodes[ownerIdx],
+          this.episodeForChunks(episodes, chunksPerEpisode, chunkSources, t.edge.id),
           previousEpisodesPerEpisode[ownerIdx],
           episodes[ownerIdx].validAt,
           customInstructions,
@@ -442,15 +490,16 @@ export class EdgeResolutionService {
     const duplicatePairs = pairResults.flat();
     if (duplicatePairs.length === 0) {
       return {
-        deduped: edgesPerEpisode,
+        canonicalEdges: allEdges,
         metrics: { ...baseMetrics, 'pairs.found': 0, 'edges.out': allEdges.length },
       };
     }
 
-    // Union-find collapses transitive duplicates and picks lex-smallest ID
-    // as canonical. Build canonical edge objects with merged episode IDs.
+    // Union-find collapses transitive duplicates and picks lex-smallest ID as
+    // canonical. canonicalById holds every edge that is its own canonical -
+    // merge winners and untouched singletons alike (an edge absent from idMap
+    // maps to itself); the merged-away losers are simply excluded.
     const idMap = compressIdMap<Uuid>(duplicatePairs);
-    const edgesById = new Map<Uuid, EntityEdge>(allEdges.map((e) => [e.id, e]));
     const canonicalById = new Map<Uuid, EntityEdge>();
 
     for (const edge of allEdges) {
@@ -467,26 +516,18 @@ export class EdgeResolutionService {
       for (const ep of edge.episodes) {
         if (!canonical.episodes.includes(ep)) canonical.episodes.push(ep);
       }
+      // No chunk-source union: each edge id keeps its own origin-episode-qualified
+      // entry, and the canonical edge selects its own episode text downstream.
     }
 
-    const deduped = edgesPerEpisode.map((edges) => {
-      const seen = new Set<Uuid>();
-      const out: EntityEdge[] = [];
-      for (const edge of edges) {
-        const canonicalId = idMap.get(edge.id) ?? edge.id;
-        if (seen.has(canonicalId)) continue;
-        seen.add(canonicalId);
-        out.push(canonicalById.get(canonicalId) ?? edgesById.get(canonicalId) ?? edge);
-      }
-      return out;
-    });
+    const canonicalEdges = [...canonicalById.values()];
 
     return {
-      deduped,
+      canonicalEdges,
       metrics: {
         ...baseMetrics,
         'pairs.found': duplicatePairs.length,
-        'edges.out': deduped.reduce((s, a) => s + a.length, 0),
+        'edges.out': canonicalEdges.length,
       },
     };
   }

@@ -32,7 +32,12 @@ describe('NodeExtractionService', () => {
       extractedEntities: [{ name: 'Alice' }, { name: 'Acme Corp' }, { name: 'Bob' }],
     });
 
-    const nodes = await service.extractNodes(mockModel, baseEpisode, []);
+    const { nodes } = await service.extractNodes(
+      mockModel,
+      baseEpisode,
+      [baseEpisode.content],
+      [],
+    );
 
     expect(nodes).toHaveLength(3);
     expect(nodes.map((n) => n.name)).toEqual(['Alice', 'Acme Corp', 'Bob']);
@@ -44,7 +49,12 @@ describe('NodeExtractionService', () => {
       extractedEntities: [{ name: 'Alice' }, { name: '   ' }, { name: 'Bob' }],
     });
 
-    const nodes = await service.extractNodes(mockModel, baseEpisode, []);
+    const { nodes } = await service.extractNodes(
+      mockModel,
+      baseEpisode,
+      [baseEpisode.content],
+      [],
+    );
 
     expect(nodes).toHaveLength(2);
     expect(nodes.map((n) => n.name)).toEqual(['Alice', 'Bob']);
@@ -55,7 +65,12 @@ describe('NodeExtractionService', () => {
       extractedEntities: [{ name: 'Alice' }],
     });
 
-    const nodes = await service.extractNodes(mockModel, baseEpisode, []);
+    const { nodes } = await service.extractNodes(
+      mockModel,
+      baseEpisode,
+      [baseEpisode.content],
+      [],
+    );
 
     expect(nodes[0].labels).toEqual(['Entity']);
   });
@@ -72,7 +87,13 @@ describe('NodeExtractionService', () => {
       ],
     });
 
-    const nodes = await service.extractNodes(mockModel, baseEpisode, [], entityTypes);
+    const { nodes } = await service.extractNodes(
+      mockModel,
+      baseEpisode,
+      [baseEpisode.content],
+      [],
+      entityTypes,
+    );
 
     expect(nodes[0].labels).toEqual(['Entity', 'Person']);
     expect(nodes[1].labels).toEqual(['Entity', 'Organization']);
@@ -87,7 +108,13 @@ describe('NodeExtractionService', () => {
     });
 
     await expect(
-      service.extractNodes(mockModel, baseEpisode, [], entityTypes),
+      service.extractNodes(
+        mockModel,
+        baseEpisode,
+        [baseEpisode.content],
+        [],
+        entityTypes,
+      ),
     ).rejects.toThrow();
   });
 
@@ -96,7 +123,12 @@ describe('NodeExtractionService', () => {
       extractedEntities: [{ name: 'Alice' }, { name: 'Bob' }],
     });
 
-    const nodes = await service.extractNodes(mockModel, baseEpisode, []);
+    const { nodes } = await service.extractNodes(
+      mockModel,
+      baseEpisode,
+      [baseEpisode.content],
+      [],
+    );
 
     nodes.forEach((n) => expect(n.id).toBeTruthy());
     expect(nodes[0].id).not.toBe(nodes[1].id);
@@ -105,9 +137,36 @@ describe('NodeExtractionService', () => {
   it('should return empty array when no entities extracted', async () => {
     mockRunnable.invoke.mockResolvedValue({ extractedEntities: [] });
 
-    const nodes = await service.extractNodes(mockModel, baseEpisode, []);
+    const { nodes } = await service.extractNodes(
+      mockModel,
+      baseEpisode,
+      [baseEpisode.content],
+      [],
+    );
 
     expect(nodes).toEqual([]);
+  });
+
+  it('unions chunk indices for a node extracted from multiple chunks', async () => {
+    // Alice appears in both chunks (deduped by name); Bob only in the first.
+    mockRunnable.invoke
+      .mockResolvedValueOnce({
+        extractedEntities: [{ name: 'Alice' }, { name: 'Bob' }],
+      })
+      .mockResolvedValueOnce({ extractedEntities: [{ name: 'Alice' }] });
+
+    const { nodes, chunkIndicesByNodeId } = await service.extractNodes(
+      mockModel,
+      baseEpisode,
+      ['Alice met Bob.', 'Alice left.'],
+      [],
+    );
+
+    expect(nodes.map((n) => n.name)).toEqual(['Alice', 'Bob']);
+    const alice = nodes.find((n) => n.name === 'Alice')!;
+    const bob = nodes.find((n) => n.name === 'Bob')!;
+    expect([...chunkIndicesByNodeId.get(alice.id)!].sort()).toEqual([0, 1]);
+    expect([...chunkIndicesByNodeId.get(bob.id)!]).toEqual([0]);
   });
 
   it('does not run attribute extraction (moved to post-resolution step in EpisodeService)', async () => {
@@ -121,7 +180,13 @@ describe('NodeExtractionService', () => {
       extractedEntities: [{ name: 'Alice', entityTypeId: 0 }],
     });
 
-    const nodes = await service.extractNodes(mockModel, baseEpisode, [], entityTypes);
+    const { nodes } = await service.extractNodes(
+      mockModel,
+      baseEpisode,
+      [baseEpisode.content],
+      [],
+      entityTypes,
+    );
 
     // Only the entity-extraction LLM call; attribute extraction happens post-resolution
     expect(mockModel.withStructuredOutput).toHaveBeenCalledTimes(1);
@@ -136,7 +201,13 @@ describe('NodeExtractionService', () => {
       extractedEntities: [{ name: 'Alice', entityTypeId: 0 }],
     });
 
-    await service.extractNodes(mockModel, baseEpisode, [], entityTypes);
+    await service.extractNodes(
+      mockModel,
+      baseEpisode,
+      [baseEpisode.content],
+      [],
+      entityTypes,
+    );
 
     expect(mockModel.withStructuredOutput).toHaveBeenCalledTimes(1);
   });
@@ -149,7 +220,17 @@ describe('NodeExtractionService', () => {
       episode: EpisodicNode,
       previousEpisodes: EpisodicNode[] = [],
     ) {
-      return new Map([[node.id, { episode, previousEpisodes }]]);
+      return new Map([
+        [
+          node.id,
+          {
+            episode,
+            previousEpisodes,
+            chunks: [episode.content],
+            sourceChunkIndices: new Set([0]),
+          },
+        ],
+      ]);
     }
 
     it('invokes structured output and applies returned summaries to canonical nodes', async () => {
@@ -188,7 +269,17 @@ describe('NodeExtractionService', () => {
         [node],
         [],
         undefined,
-        new Map([[node.id, { episode: baseEpisode, previousEpisodes: [] }]]),
+        new Map([
+          [
+            node.id,
+            {
+              episode: baseEpisode,
+              previousEpisodes: [],
+              chunks: [baseEpisode.content],
+              sourceChunkIndices: new Set([0]),
+            },
+          ],
+        ]),
       );
 
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
@@ -218,7 +309,17 @@ describe('NodeExtractionService', () => {
         [node],
         [edge],
         entityTypes,
-        new Map([[node.id, { episode: baseEpisode, previousEpisodes: [] }]]),
+        new Map([
+          [
+            node.id,
+            {
+              episode: baseEpisode,
+              previousEpisodes: [],
+              chunks: [baseEpisode.content],
+              sourceChunkIndices: new Set([0]),
+            },
+          ],
+        ]),
       );
 
       expect(node.attributes).toEqual({ age: 30 });
@@ -238,13 +339,23 @@ describe('NodeExtractionService', () => {
         [node],
         [],
         entityTypes,
-        new Map([[node.id, { episode: baseEpisode, previousEpisodes: [] }]]),
+        new Map([
+          [
+            node.id,
+            {
+              episode: baseEpisode,
+              previousEpisodes: [],
+              chunks: [baseEpisode.content],
+              sourceChunkIndices: new Set([0]),
+            },
+          ],
+        ]),
       );
 
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
     });
 
-    it('skips nodes missing from nodeContext', async () => {
+    it('throws when a typed node is missing from nodeContext (invariant violation)', async () => {
       const entityTypes = {
         Person: { description: 'A human individual', schema: z.object({}) },
       };
@@ -253,8 +364,9 @@ describe('NodeExtractionService', () => {
         labels: ['Entity', 'Person'],
       });
 
-      await service.fillEntityAttributes(mockModel, [node], [], entityTypes, new Map());
-
+      await expect(
+        service.fillEntityAttributes(mockModel, [node], [], entityTypes, new Map()),
+      ).rejects.toThrow();
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
     });
   });

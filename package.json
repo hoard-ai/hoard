@@ -23,7 +23,7 @@
     "infra:test:rm": "docker compose -p hoard-test -f docker-compose.yml -f docker-compose.test.yml down postgres redis -v",
     "infra:test:reset": "npm run infra:test:rm && npm run infra:test:up && npm run prisma:test:deploy",
     "build": "nest build",
-    "eval:chunk-inspector:build": "esbuild src/knowledge-graph/extraction/content-chunking.ts --bundle --format=esm --platform=browser --tsconfig=tsconfig.json --outfile=eval/chunk-inspector/chunking.bundle.js",
+    "eval:chunk-inspector:build": "esbuild src/knowledge-graph/episode/content-chunking.ts --bundle --format=esm --platform=browser --tsconfig=tsconfig.json --outfile=eval/chunk-inspector/chunking.bundle.js",
     "generate": "nest generate",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "format:diff": "git status --porcelain --untracked-files=all | awk '$1 !~ /D/ {print $NF}' | grep -E '\\.(ts)$' | grep -E '^(src|test)/' | xargs --no-run-if-empty prettier --write",

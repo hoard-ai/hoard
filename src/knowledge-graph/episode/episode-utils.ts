@@ -1,3 +1,7 @@
+import { Uuid } from '@/common';
+
+import { NodeEpisodeContext } from '../extraction';
+import { EntityNode, EpisodicNode } from '../models';
 import { NodeLabel, NodeLabels, NodeLabelSchema, RelationshipType } from '../types';
 import { EdgeTypeMap, EdgeTypeMappings } from './types';
 
@@ -56,4 +60,61 @@ export function getEffectiveTypeMappings(
     );
   }
   return effectiveEdgeTypeMappings;
+}
+
+/**
+ * Maps each canonical node to its episode context (chunks + the chunk indices
+ * it was extracted from) for the attribute/summary helpers. Within an episode,
+ * indices from nodes merged into one canonical id are unioned; across episodes
+ * the first episode to reference a canonical node wins.
+ */
+export function buildNodeContext(
+  canonicalNodesPerEpisode: EntityNode[][],
+  chunkIndicesByNodeIdPerEpisode: Map<Uuid, Set<number>>[],
+  canonicalIdByNodeId: Map<Uuid, Uuid>,
+  episodicNodes: EpisodicNode[],
+  prevEpisodesPerEpisode: EpisodicNode[][],
+  chunksPerEpisode: string[][],
+): NodeEpisodeContext {
+  const nodeContext: NodeEpisodeContext = new Map();
+
+  canonicalNodesPerEpisode.forEach((nodes, i) => {
+    // Remap this episode's extracted-node chunk indices onto canonical ids so
+    // each canonical node's episode text covers every chunk it was extracted from.
+    const chunkIndicesByCanonicalId = new Map<Uuid, Set<number>>();
+
+    for (const [extractedId, idxs] of chunkIndicesByNodeIdPerEpisode[i]) {
+      const canonicalId = canonicalIdByNodeId.get(extractedId) ?? extractedId;
+      let indicesSet = chunkIndicesByCanonicalId.get(canonicalId);
+
+      if (!indicesSet) {
+        indicesSet = new Set();
+        chunkIndicesByCanonicalId.set(canonicalId, indicesSet);
+      }
+      for (const idx of idxs) indicesSet.add(idx);
+    }
+
+    for (const n of nodes) {
+      // TODO: first-episode-wins. A node mentioned in several batch episodes
+      // uses only the first episode's chunk text (its facts still arrive via
+      // edges). Full fix = multi-episode context (chunk text union + per-episode
+      // referenceTime/previousEpisodes/summary grouping); gate on eval.
+      if (nodeContext.has(n.id)) continue;
+
+      // Every canonical node traces back to an extracted node of this episode
+      const sourceChunkIndices = chunkIndicesByCanonicalId.get(n.id);
+      if (!sourceChunkIndices) {
+        throw new Error(
+          `nodeContext: canonical node ${n.id} has no originating chunk indices`,
+        );
+      }
+      nodeContext.set(n.id, {
+        episode: episodicNodes[i],
+        previousEpisodes: prevEpisodesPerEpisode[i],
+        chunks: chunksPerEpisode[i],
+        sourceChunkIndices,
+      });
+    }
+  });
+  return nodeContext;
 }

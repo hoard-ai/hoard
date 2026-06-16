@@ -32,6 +32,11 @@ function makeNode(name: string, embedding: number[] | null = null): EntityNode {
   });
 }
 
+// Extracted nodes always carry originating chunk indices (single-chunk episode
+// here); resolveNodes throws on the LLM path without them.
+const chunkIndices = (...nodes: EntityNode[]): Map<Uuid, Set<number>> =>
+  new Map(nodes.map((n) => [n.id, new Set([0])]));
+
 describe('NodeResolutionService', () => {
   let service: NodeResolutionService;
   let mockModel: DeepMocked<BaseChatModel>;
@@ -67,11 +72,13 @@ describe('NodeResolutionService', () => {
       const existing = [makeNode('alice', KG_HIGH_SIM_EMBEDDING)]; // normalizes to same
       existing[0].id = u('existing-id');
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
@@ -84,11 +91,13 @@ describe('NodeResolutionService', () => {
       const existing = [makeNode('alice', KG_HIGH_SIM_EMBEDDING)];
       existing[0].id = u('existing-id');
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(result.duplicatePairs).toHaveLength(1);
@@ -107,11 +116,13 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice Johnson', duplicateCandidateId: 0 }],
       });
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(mockModel.withStructuredOutput).toHaveBeenCalled();
@@ -128,11 +139,13 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice Johnson', duplicateCandidateId: -1 }],
       });
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(mockModel.withStructuredOutput).toHaveBeenCalled();
@@ -157,11 +170,13 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice', duplicateCandidateId: 0 }],
       });
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(mockModel.withStructuredOutput).toHaveBeenCalled();
@@ -185,11 +200,13 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice', duplicateCandidateId: 0 }],
       });
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(result.duplicatePairs).toHaveLength(1);
@@ -216,11 +233,13 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice', duplicateCandidateId: -1 }],
       });
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(result.idMap.has(extracted[0].id)).toBe(false);
@@ -247,11 +266,13 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice', duplicateCandidateId: 0 }],
       });
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(result.idMap.get(extracted[0].id)).toBe('exist-1');
@@ -274,11 +295,13 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice Smith', duplicateCandidateId: -1 }],
       });
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(result.resolvedNodes[0].name).toBe('Alice Smith');
@@ -298,11 +321,13 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'bob', duplicateCandidateId: 0 }],
       });
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(mockModel.withStructuredOutput).toHaveBeenCalled();
@@ -322,11 +347,13 @@ describe('NodeResolutionService', () => {
         },
       ];
 
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
         extracted,
-        existing,
       );
 
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
@@ -340,7 +367,14 @@ describe('NodeResolutionService', () => {
         makeNode('Bob', KG_HIGH_SIM_EMBEDDING),
       ];
 
-      const result = await service.resolveNodes(mockModel, baseEpisode, extracted, []);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue([]);
+      const result = await service.resolveNodes(
+        mockModel,
+        baseEpisode,
+        [baseEpisode.content],
+        chunkIndices(...extracted),
+        extracted,
+      );
 
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
       expect(result.resolvedNodes).toHaveLength(2);

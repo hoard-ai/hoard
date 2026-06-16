@@ -26,8 +26,7 @@ import {
   EdgeTimestampsSchema,
   ExtractedEdgesSchema,
 } from '../prompts';
-
-export type EdgeReferenceTimeContext = Map<Uuid, { referenceTime: Date }>;
+import { EdgeReferenceTimeContext, ExtractEdgesResult } from './types';
 
 @Injectable()
 export class EdgeExtractionService {
@@ -36,6 +35,7 @@ export class EdgeExtractionService {
   async extractEdges(
     model: BaseChatModel,
     episode: EpisodicNode,
+    chunks: string[],
     nodes: EntityNode[],
     previousEpisodes: EpisodicNode[],
     referenceTime: Date,
@@ -43,10 +43,11 @@ export class EdgeExtractionService {
     edgeTypes?: EdgeTypeMap,
     edgeTypeMappings?: EdgeTypeMappings,
     ctx?: LlmContext,
-  ): Promise<EntityEdge[]> {
-    const { edges } = await this.extractEdgesImpl(
+  ): Promise<ExtractEdgesResult> {
+    const { edges, chunkIndicesByEdgeId } = await this.extractEdgesImpl(
       model,
       episode,
+      chunks,
       nodes,
       previousEpisodes,
       referenceTime,
@@ -55,13 +56,14 @@ export class EdgeExtractionService {
       edgeTypeMappings,
       ctx,
     );
-    return edges;
+    return { edges, chunkIndicesByEdgeId };
   }
 
   @Span('edgeExtraction', { onResult: metricsOnResult })
   private async extractEdgesImpl(
     model: BaseChatModel,
     episode: EpisodicNode,
+    chunks: string[],
     nodes: EntityNode[],
     previousEpisodes: EpisodicNode[],
     referenceTime: Date,
@@ -69,40 +71,62 @@ export class EdgeExtractionService {
     edgeTypes?: EdgeTypeMap,
     edgeTypeMappings?: EdgeTypeMappings,
     ctx?: LlmContext,
-  ): Promise<{ edges: EntityEdge[]; metrics: SpanMetrics }> {
-    const messages = buildExtractEdgesMessages({
-      episode,
-      nodes,
-      previousEpisodes,
-      referenceTime,
-      customInstructions,
-      edgeTypes,
-      edgeTypeMappings,
-    });
-    const result = await invokeStructured(model, ExtractedEdgesSchema, messages, {
-      callbacks: this.llmTracer.getCallbacks(ctx),
-      runName: 'extract-edges',
-      tags: ['knowledge-graph', 'extraction.edge'],
-      validate: buildExtractEdgesValidator({ nodes }),
-    });
-
-    const edges = result.edges.map((e) =>
-      createEntityEdge({
-        name: e.relationType,
-        fact: e.fact,
-        graphId: episode.graphId,
-        sourceNodeId: nodes[e.sourceEntityIdx].id,
-        targetNodeId: nodes[e.targetEntityIdx].id,
-        episodes: [episode.id],
-        validAt: e.validAt ? new Date(e.validAt) : null,
-        invalidAt: e.invalidAt ? new Date(e.invalidAt) : null,
+  ): Promise<{
+    edges: EntityEdge[];
+    chunkIndicesByEdgeId: Map<Uuid, Set<number>>;
+    metrics: SpanMetrics;
+  }> {
+    // Each chunk gets the SAME full canonical node list, so the entity index
+    // space is shared across chunks (nodes[idx] resolves identically everywhere).
+    const perChunk = await withConcurrency(
+      LLM_CONCURRENCY_LIMIT,
+      chunks.map((chunk) => async () => {
+        const messages = buildExtractEdgesMessages({
+          episode: { ...episode, content: chunk },
+          nodes,
+          previousEpisodes,
+          referenceTime,
+          customInstructions,
+          edgeTypes,
+          edgeTypeMappings,
+        });
+        const result = await invokeStructured(model, ExtractedEdgesSchema, messages, {
+          callbacks: this.llmTracer.getCallbacks(ctx),
+          runName: 'extract-edges',
+          tags: ['knowledge-graph', 'extraction.edge'],
+          validate: buildExtractEdgesValidator({ nodes }),
+        });
+        return result.edges.map((e) =>
+          createEntityEdge({
+            name: e.relationType,
+            fact: e.fact,
+            graphId: episode.graphId,
+            sourceNodeId: nodes[e.sourceEntityIdx].id,
+            targetNodeId: nodes[e.targetEntityIdx].id,
+            episodes: [episode.id],
+            validAt: e.validAt ? new Date(e.validAt) : null,
+            invalidAt: e.invalidAt ? new Date(e.invalidAt) : null,
+          }),
+        );
       }),
     );
+    // Flatten chunk edges into one per-episode list; tag each with its
+    // originating chunk index (singleton until dedup unions duplicates).
+    const edges: EntityEdge[] = [];
+    const chunkIndicesByEdgeId = new Map<Uuid, Set<number>>();
 
+    perChunk.forEach((chunkEdges, chunkIdx) => {
+      for (const edge of chunkEdges) {
+        edges.push(edge);
+        chunkIndicesByEdgeId.set(edge.id, new Set([chunkIdx]));
+      }
+    });
     return {
       edges,
+      chunkIndicesByEdgeId,
       metrics: {
         'episode.id': episode.id,
+        'chunks.count': chunks.length,
         'nodes.input.count': nodes.length,
         'edgeTypes.count': edgeTypes ? Object.keys(edgeTypes).length : 0,
         'edges.extracted.count': edges.length,
@@ -160,18 +184,25 @@ export class EdgeExtractionService {
     for (const edge of resolvedEdges) {
       const src = idToNode.get(edge.sourceNodeId);
       const tgt = idToNode.get(edge.targetNodeId);
-      if (!src || !tgt) continue;
+      if (!src || !tgt) {
+        throw new Error(
+          `fillEdgeAttributes: edge ${edge.id} endpoint missing from canonical nodes`,
+        );
+      }
       const applicable = getApplicableEdgeTypes(
         src.labels,
         tgt.labels,
         edgeTypes,
         edgeTypeMappings,
       );
+      // Edges whose relation isn't a custom fact type get no attributes.
       const typeDef = applicable[edge.name];
       if (!typeDef) continue;
 
       const edgeCtx = edgeContext.get(edge.id);
-      if (!edgeCtx) continue;
+      if (!edgeCtx) {
+        throw new Error(`fillEdgeAttributes: edge ${edge.id} missing from edgeContext`);
+      }
       tasks.push({ edge, schema: typeDef.schema, referenceTime: edgeCtx.referenceTime });
     }
 

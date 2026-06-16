@@ -50,9 +50,10 @@ describe('EdgeExtractionService', () => {
       ],
     });
 
-    const edges = await service.extractEdges(
+    const { edges } = await service.extractEdges(
       mockModel,
       baseEpisode,
+      [baseEpisode.content],
       nodes,
       [],
       KG_REFERENCE_TIME,
@@ -64,6 +65,46 @@ describe('EdgeExtractionService', () => {
     expect(edges[0].name).toBe('WORKS_AT');
     expect(edges[0].fact).toBe('Alice works at Acme Corp.');
     expect(edges[0].graphId).toBe(KG_TEST_GRAPH_ID);
+  });
+
+  it('tags each edge with the chunk index it was extracted from', async () => {
+    mockRunnable.invoke
+      .mockResolvedValueOnce({
+        edges: [
+          {
+            sourceEntityIdx: 0,
+            targetEntityIdx: 2,
+            relationType: 'WORKS_AT',
+            fact: 'Alice works at Acme Corp.',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        edges: [
+          {
+            sourceEntityIdx: 1,
+            targetEntityIdx: 2,
+            relationType: 'CEO_OF',
+            fact: 'Bob is the CEO of Acme Corp.',
+          },
+        ],
+      });
+
+    const { edges, chunkIndicesByEdgeId } = await service.extractEdges(
+      mockModel,
+      baseEpisode,
+      ['Alice works at Acme Corp.', 'Bob is the CEO of Acme Corp.'],
+      nodes,
+      [],
+      KG_REFERENCE_TIME,
+    );
+
+    expect(edges).toHaveLength(2);
+    const worksAt = edges.find((e) => e.name === 'WORKS_AT')!;
+    const ceoOf = edges.find((e) => e.name === 'CEO_OF')!;
+    // Singleton per origin chunk - dedup never unions edge chunk sources.
+    expect([...chunkIndicesByEdgeId.get(worksAt.id)!]).toEqual([0]);
+    expect([...chunkIndicesByEdgeId.get(ceoOf.id)!]).toEqual([1]);
   });
 
   it('should pass validAt/invalidAt from LLM response to edge', async () => {
@@ -80,9 +121,10 @@ describe('EdgeExtractionService', () => {
       ],
     });
 
-    const edges = await service.extractEdges(
+    const { edges } = await service.extractEdges(
       mockModel,
       baseEpisode,
+      [baseEpisode.content],
       nodes,
       [],
       KG_REFERENCE_TIME,
@@ -104,9 +146,10 @@ describe('EdgeExtractionService', () => {
       ],
     });
 
-    const edges = await service.extractEdges(
+    const { edges } = await service.extractEdges(
       mockModel,
       baseEpisode,
+      [baseEpisode.content],
       nodes,
       [],
       KG_REFERENCE_TIME,
@@ -129,7 +172,14 @@ describe('EdgeExtractionService', () => {
     });
 
     await expect(
-      service.extractEdges(mockModel, baseEpisode, nodes, [], KG_REFERENCE_TIME),
+      service.extractEdges(
+        mockModel,
+        baseEpisode,
+        [baseEpisode.content],
+        nodes,
+        [],
+        KG_REFERENCE_TIME,
+      ),
     ).rejects.toThrow();
   });
 
@@ -146,7 +196,14 @@ describe('EdgeExtractionService', () => {
     });
 
     await expect(
-      service.extractEdges(mockModel, baseEpisode, nodes, [], KG_REFERENCE_TIME),
+      service.extractEdges(
+        mockModel,
+        baseEpisode,
+        [baseEpisode.content],
+        nodes,
+        [],
+        KG_REFERENCE_TIME,
+      ),
     ).rejects.toThrow();
   });
 
@@ -162,9 +219,10 @@ describe('EdgeExtractionService', () => {
       ],
     });
 
-    const edges = await service.extractEdges(
+    const { edges } = await service.extractEdges(
       mockModel,
       baseEpisode,
+      [baseEpisode.content],
       nodes,
       [],
       KG_REFERENCE_TIME,
@@ -176,9 +234,10 @@ describe('EdgeExtractionService', () => {
   it('should return empty array when no edges extracted', async () => {
     mockRunnable.invoke.mockResolvedValue({ edges: [] });
 
-    const edges = await service.extractEdges(
+    const { edges } = await service.extractEdges(
       mockModel,
       baseEpisode,
+      [baseEpisode.content],
       nodes,
       [],
       KG_REFERENCE_TIME,
@@ -205,9 +264,10 @@ describe('EdgeExtractionService', () => {
       ],
     });
 
-    const edges = await service.extractEdges(
+    const { edges } = await service.extractEdges(
       mockModel,
       baseEpisode,
+      [baseEpisode.content],
       nodes,
       [],
       KG_REFERENCE_TIME,

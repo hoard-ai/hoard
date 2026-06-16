@@ -3,6 +3,7 @@ import { KgNodeFactory } from '@/test/factories';
 import {
   concatenateEpisodes,
   formatPreviousEpisodes,
+  selectChunkText,
   truncateAtSentence,
 } from './text-utils';
 
@@ -81,5 +82,40 @@ describe('formatPreviousEpisodes', () => {
     expect(formatPreviousEpisodes([e0])).toBe(
       '- [Prev] (2025-12-31T00:00:00Z): prior content',
     );
+  });
+});
+
+describe('selectChunkText', () => {
+  it('passes a single-chunk episode through unchanged (no labels)', () => {
+    expect(selectChunkText(new Set([0]), ['only chunk'])).toBe('only chunk');
+  });
+
+  it('labels a single excerpt of a multi-chunk episode (1-based)', () => {
+    const out = selectChunkText(new Set([2]), ['a', 'b', 'c', 'd']);
+    expect(out).toContain('[Chunk 3]\nc');
+    expect(out).toContain('excerpt (one chunk)');
+    expect(out).not.toContain('[Chunk 1]');
+    expect(out).not.toContain('[Chunk 2]');
+    expect(out).not.toContain('[Chunk 4]');
+  });
+
+  it('labels multiple excerpts in ascending order with the overlap header', () => {
+    const out = selectChunkText(new Set([3, 1]), ['a', 'b', 'c', 'd']);
+    expect(out).toContain('may overlap and need not be contiguous');
+    expect(out.indexOf('[Chunk 2]')).toBeLessThan(out.indexOf('[Chunk 4]'));
+    expect(out).toContain('[Chunk 2]\nb');
+    expect(out).toContain('[Chunk 4]\nd');
+  });
+
+  it('falls back to the whole episode when indices are empty (unknown provenance)', () => {
+    const out = selectChunkText(new Set(), ['a', 'b']);
+    expect(out).toContain('[Chunk 1]\na');
+    expect(out).toContain('[Chunk 2]\nb');
+    expect(out).toContain('may overlap and need not be contiguous');
+  });
+
+  it('throws on an out-of-range chunk index (provenance bookkeeping bug)', () => {
+    expect(() => selectChunkText(new Set([9]), ['a', 'b'])).toThrow();
+    expect(() => selectChunkText(new Set([-1]), ['a', 'b'])).toThrow();
   });
 });

@@ -112,6 +112,41 @@ export function formatPreviousEpisodes(episodes: EpisodicNode[]): string {
     .join('\n');
 }
 
+// TODO: Consider this: You feed a book that has Alice in 20 chunks.
+// These 20 chunks are passed down to a prompt. Far too much. Needs a cap probably.
+
+/**
+ * Returns the episode text scoped to `chunkIndices` - the chunks an item came
+ * from - for a per-item operation (summary, attributes, dedup, resolution). Feed
+ * the result as `content` of a synthetic episode to `formatCurrentEpisode`.
+ * A single-chunk episode passes its content through unchanged.
+ *
+ * An empty `chunkIndices` means "chunks unknown" and falls back to the whole
+ * episode (all chunks) rather than yielding blank content. An out-of-range index
+ * is a provenance-bookkeeping bug and throws rather than being silently dropped.
+ */
+export function selectChunkText(chunkIndices: Set<number>, allChunks: string[]): string {
+  for (const i of chunkIndices) {
+    if (i < 0 || i >= allChunks.length) {
+      throw new Error(
+        `selectChunkText: chunk index ${i} out of range (episode has ${allChunks.length} chunks)`,
+      );
+    }
+  }
+  if (allChunks.length <= 1) return allChunks[0] ?? '';
+
+  // No known chunks for this item -> use the whole episode, never blank content.
+  const sorted = [...chunkIndices].sort((a, b) => a - b);
+  const effective = sorted.length > 0 ? sorted : allChunks.map((_, i) => i);
+
+  const labeled = effective.map((i) => `[Chunk ${i + 1}]\n${allChunks[i]}`).join('\n\n');
+  const header =
+    effective.length === 1
+      ? 'The following is an excerpt (one chunk) from a larger episode; surrounding context is omitted.'
+      : 'The following are excerpts (chunks) from a larger episode. Chunks may overlap and need not be contiguous.';
+  return `${header}\n\n${labeled}`;
+}
+
 export function formatCurrentEpisode(
   episode: EpisodicNode,
   opts: { includeSource?: boolean } = {},

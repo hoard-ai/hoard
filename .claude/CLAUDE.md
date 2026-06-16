@@ -43,6 +43,11 @@ relevant documentation, and don't forget to lint and format at the end.
 Prefer to use `npm run format:diff` instead of `npm run format` as
 it only formats files that were changed in git, and is significantly faster.
 
+When `format`/`lint --fix` reports it reformatted files after the build and
+tests already passed, do NOT re-run the build or tests. Those tools only make
+cosmetic changes (whitespace, import order, line wrapping) that cannot break a
+green build - re-running is wasted time.
+
 Never add "migration code" to make sure the code is compatible with previous
 versions of the graph. If something requires a manual migration, tell that
 to me explicitly.
@@ -52,6 +57,23 @@ takes 22 seconds to run, so you're wasting time. The output isn't that big.
 Same for `npm test`.
 
 Use `npm run prisma:generate` instead of `npx prisma generate `since it automatically uses dotenv to load the proper .env file when calling prisma. Same for other prisma commands.
+
+## Conventions
+
+- In the knowledge-graph module, DB access lives only in `src/knowledge-graph/repository/repositories`; its services/helpers consume repo methods, never Prisma directly. (This is a KG-module rule, not a top-level API rule.)
+- Module types go in `src/<module>/types/<module>.types.ts` with a `types/index.ts` barrel.
+- Never swallow exceptions — throw or log.
+- A value that should always be present but is typed optional (`?:` / `| undefined`) is debt — make required things required, and throw on a missing value rather than silently defaulting when the type is shared with a path that legitimately lacks it.
+- No `eslint-disable` for typing rules — restructure types (`unknown` over `any`, drop needless `async`).
+- Don't re-`parse()` in repo methods — callers already validated.
+- Errors/logs on LLM paths must not include raw model output (PII via entity names/facts) — surface only structural info / ZodError issues.
+- Avoid PII in logs / traces at all costs.
+- Comments: inline comments inside a body are one short line max, no multi-line explanatory blocks. A function/method/class's own description belongs in a `/** */` JSDoc docstring above the declaration, not `//` line comments (the one-line rule is for inline body comments, not the doc header).
+- API stays presentation-agnostic — no colors, sizes, coordinates, or layout; the frontend owns visuals.
+- Omit `LlmContext.sessionId` unless there's a real session/conversation; never fall back to userId/graphId/jobId.
+- Prompt text: ASCII hyphens (no em dashes), real-newline wrapping (no trailing `\`), schema field refs in camelCase.
+- Tests: assert shape (length/instanceof/empty), not exact error strings; derive enum-driven values from Zod schemas instead of hardcoding.
+  We test logic, rather than exact wording the developer specified.
 
 Lastly, `tsconfig.json`:
 

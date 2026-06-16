@@ -17,6 +17,7 @@ import {
 import { EntityEdge } from '../models';
 import { EntityEdgeRepository } from '../repository/repositories';
 import { EdgeResolutionService } from './edge-resolution.service';
+import { EdgeChunkSources } from './types';
 
 // Stable test IDs so intra-batch dedup and endpoint matching reliably fire
 // across edges constructed by `makeEdge` without explicit overrides.
@@ -39,6 +40,11 @@ function makeEdge(
   });
 }
 
+// Edges always carry origin-episode-qualified chunk sources through extraction +
+// dedup; the dedup LLM path throws without them (single episode 0, chunk 0 here).
+const chunkSources = (...edges: EntityEdge[]): EdgeChunkSources =>
+  new Map(edges.map((e) => [e.id, { episodeIndex: 0, indices: new Set([0]) }]));
+
 describe('EdgeResolutionService', () => {
   let service: EdgeResolutionService;
   let mockModel: DeepMocked<BaseChatModel>;
@@ -59,6 +65,7 @@ describe('EdgeResolutionService', () => {
     mockEdgeRepo = module.get(EntityEdgeRepository);
 
     mockEdgeRepo.searchByFact.mockResolvedValue([]);
+    jest.spyOn(service, 'collectCandidates').mockResolvedValue([]);
 
     mockModel = createMock<BaseChatModel>();
     mockRunnable = { invoke: jest.fn() };
@@ -81,9 +88,10 @@ describe('EdgeResolutionService', () => {
 
     const result = await service.resolveEdges(
       mockModel,
-      baseEpisode,
+      [baseEpisode],
+      [[baseEpisode.content]],
+      chunkSources(edge1, edge2),
       [edge1, edge2],
-      [],
       new Map(),
       KG_REFERENCE_TIME,
     );
@@ -109,9 +117,10 @@ describe('EdgeResolutionService', () => {
 
     const result = await service.resolveEdges(
       mockModel,
-      baseEpisode,
+      [baseEpisode],
+      [[baseEpisode.content]],
+      chunkSources(edge),
       [edge],
-      [],
       idMap,
       KG_REFERENCE_TIME,
     );
@@ -129,9 +138,10 @@ describe('EdgeResolutionService', () => {
 
     const result = await service.resolveEdges(
       mockModel,
-      baseEpisode,
+      [baseEpisode],
+      [[baseEpisode.content]],
+      chunkSources(edge),
       [edge],
-      [],
       new Map(),
       KG_REFERENCE_TIME,
     );
@@ -145,6 +155,7 @@ describe('EdgeResolutionService', () => {
       name: 'WORKS_AT',
       fact: 'Alice works at Acme',
       factEmbedding: KG_HIGH_SIM_EMBEDDING,
+      episodes: [baseEpisode.id],
     });
     const existingEdge = makeEdge({
       name: 'WORKS_AT',
@@ -159,11 +170,13 @@ describe('EdgeResolutionService', () => {
       contradictedFacts: [],
     });
 
+    jest.spyOn(service, 'collectCandidates').mockResolvedValue([existingEdge]);
     const result = await service.resolveEdges(
       mockModel,
-      baseEpisode,
+      [baseEpisode],
+      [[baseEpisode.content]],
+      chunkSources(edge),
       [edge],
-      [existingEdge],
       new Map(),
       KG_REFERENCE_TIME,
     );
@@ -196,11 +209,13 @@ describe('EdgeResolutionService', () => {
       contradictedFacts: [0],
     });
 
+    jest.spyOn(service, 'collectCandidates').mockResolvedValue([existingEdge]);
     const result = await service.resolveEdges(
       mockModel,
-      baseEpisode,
+      [baseEpisode],
+      [[baseEpisode.content]],
+      chunkSources(edge),
       [edge],
-      [existingEdge],
       new Map(),
       KG_REFERENCE_TIME,
     );
@@ -230,11 +245,13 @@ describe('EdgeResolutionService', () => {
       contradictedFacts: [0],
     });
 
+    jest.spyOn(service, 'collectCandidates').mockResolvedValue([existingEdge]);
     const result = await service.resolveEdges(
       mockModel,
-      baseEpisode,
+      [baseEpisode],
+      [[baseEpisode.content]],
+      chunkSources(edge),
       [edge],
-      [existingEdge],
       new Map(),
       KG_REFERENCE_TIME,
     );
@@ -277,12 +294,16 @@ describe('EdgeResolutionService', () => {
       contradictedFacts: [],
     });
 
+    jest
+      .spyOn(service, 'collectCandidates')
+      .mockResolvedValue([endpointEdge, similarEdge]);
     await expect(
       service.resolveEdges(
         mockModel,
-        baseEpisode,
+        [baseEpisode],
+        [[baseEpisode.content]],
+        chunkSources(edge),
         [edge],
-        [endpointEdge, similarEdge],
         new Map(),
         KG_REFERENCE_TIME,
       ),
@@ -298,9 +319,10 @@ describe('EdgeResolutionService', () => {
 
     const result = await service.resolveEdges(
       mockModel,
-      baseEpisode,
+      [baseEpisode],
+      [[baseEpisode.content]],
+      chunkSources(edge),
       [edge],
-      [],
       new Map(),
       KG_REFERENCE_TIME,
     );
@@ -328,9 +350,10 @@ describe('EdgeResolutionService', () => {
 
     await service.resolveEdges(
       mockModel,
-      baseEpisode,
+      [baseEpisode],
+      [[baseEpisode.content]],
+      chunkSources(edge),
       [edge],
-      [],
       new Map(),
       KG_REFERENCE_TIME,
     );
@@ -359,16 +382,101 @@ describe('EdgeResolutionService', () => {
       contradictedFacts: [],
     });
 
-    // existingEdges contains the endpoint edge (same src/tgt as `edge`)
+    // candidate pool contains the endpoint edge (same src/tgt as `edge`)
+    jest.spyOn(service, 'collectCandidates').mockResolvedValue([endpointEdge]);
     await service.resolveEdges(
       mockModel,
-      baseEpisode,
+      [baseEpisode],
+      [[baseEpisode.content]],
+      chunkSources(edge),
       [edge],
-      [endpointEdge],
       new Map(),
       KG_REFERENCE_TIME,
     );
 
     expect(mockModel.withStructuredOutput).toHaveBeenCalled();
+  });
+
+  describe('dedupeAcrossBatch', () => {
+    it('collapses a cross-episode duplicate into one flat canonical edge', async () => {
+      // Same endpoints + fact extracted from two different batch episodes.
+      const edge1 = makeEdge({
+        name: 'WORKS_AT',
+        fact: 'Alice works at Acme',
+        factEmbedding: KG_HIGH_SIM_EMBEDDING,
+        episodes: [u('ep-1')],
+      });
+      const edge2 = makeEdge({
+        name: 'WORKS_AT',
+        fact: 'Alice works at Acme',
+        factEmbedding: KG_HIGH_SIM_EMBEDDING,
+        episodes: [u('ep-2')],
+      });
+
+      // Each edge sees the other as a same-endpoint candidate (idx 0); the LLM
+      // flags it as a duplicate.
+      mockRunnable.invoke.mockResolvedValue({
+        duplicateFacts: [0],
+        contradictedFacts: [],
+      });
+
+      // edge1 originates in episode 0, edge2 in episode 1.
+      const sources: EdgeChunkSources = new Map([
+        [edge1.id, { episodeIndex: 0, indices: new Set([0]) }],
+        [edge2.id, { episodeIndex: 1, indices: new Set([0]) }],
+      ]);
+
+      const result = await service.dedupeAcrossBatch(
+        mockModel,
+        [[edge1], [edge2]],
+        [baseEpisode, baseEpisode],
+        [['chunk 0'], ['chunk 1']],
+        sources,
+        [[], []],
+      );
+
+      // Flat list, one surviving canonical edge whose episodes union both origins.
+      expect(result).toHaveLength(1);
+      expect([edge1.id, edge2.id]).toContain(result[0].id);
+      expect(result[0].episodes).toEqual(expect.arrayContaining([u('ep-1'), u('ep-2')]));
+    });
+
+    it('returns both edges flat when they are not duplicates', async () => {
+      // Different endpoints + no embeddings -> no endpoint/cosine candidates, so
+      // no LLM dedup call is even made.
+      const edge1 = makeEdge({
+        name: 'WORKS_AT',
+        fact: 'Alice works at Acme',
+        factEmbedding: null,
+        sourceNodeId: u('a'),
+        targetNodeId: u('b'),
+        episodes: [u('ep-1')],
+      });
+      const edge2 = makeEdge({
+        name: 'LIVES_IN',
+        fact: 'Bob lives in Paris',
+        factEmbedding: null,
+        sourceNodeId: u('c'),
+        targetNodeId: u('d'),
+        episodes: [u('ep-2')],
+      });
+
+      const sources: EdgeChunkSources = new Map([
+        [edge1.id, { episodeIndex: 0, indices: new Set([0]) }],
+        [edge2.id, { episodeIndex: 1, indices: new Set([0]) }],
+      ]);
+
+      const result = await service.dedupeAcrossBatch(
+        mockModel,
+        [[edge1], [edge2]],
+        [baseEpisode, baseEpisode],
+        [['chunk 0'], ['chunk 1']],
+        sources,
+        [[], []],
+      );
+
+      expect(result.map((e) => e.id).sort()).toEqual([edge1.id, edge2.id].sort());
+      expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
+    });
   });
 });

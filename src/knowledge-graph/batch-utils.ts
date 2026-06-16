@@ -7,6 +7,12 @@ import { EntityEdge } from '@/knowledge-graph/models';
  */
 export const LLM_CONCURRENCY_LIMIT = 10;
 
+// TODO: global LLM semaphore. withConcurrency creates a fresh semaphore per
+// call, so nested fan-out (per-episode in episode.service wrapping per-chunk in
+// node/edge extraction) can run up to LLM_CONCURRENCY_LIMIT^2 calls at once and
+// blow past provider rate limits. Replace the per-call limit with one shared
+// permit pool so total in-flight LLM calls are bounded regardless of nesting.
+
 class CountingSemaphore {
   private count: number;
   private readonly waiters: Array<() => void> = [];

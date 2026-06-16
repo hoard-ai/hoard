@@ -27,6 +27,7 @@ import {
   createEpisodicNode,
   createHasEpisodeEdge,
   createSagaNode,
+  EntityEdge,
   EpisodicNode,
 } from '../models';
 import { buildSummarizeSagasMessages, SagaSummarySchema } from '../prompts';
@@ -39,13 +40,15 @@ import {
   SagaNodeRepository,
 } from '../repository';
 import { EdgeResolutionService, NodeResolutionService } from '../resolution';
+import type { EdgeChunkSources } from '../resolution/types';
 import {
   EpisodeType,
   NodeNameSchema,
   RetrieveEpisodesParamsInput,
   RetrieveEpisodesParamsSchema,
 } from '../types';
-import { getEffectiveTypeMappings } from './episode-utils';
+import { prepareChunks } from './content-chunking';
+import { buildNodeContext, getEffectiveTypeMappings } from './episode-utils';
 import {
   AddEpisodeResult,
   AddJsonEpisodesOptionsInput,
@@ -344,7 +347,7 @@ export class EpisodeService {
       ),
     );
 
-    // 3. Create + save episodic nodes (apply id override if provided)
+    // 3. Create episodic nodes (apply id override if provided)
     const episodicNodes = episodes.map((raw) => {
       const node = createEpisodicNode({
         name: raw.name,
@@ -356,17 +359,20 @@ export class EpisodeService {
       });
       return raw.id ? { ...node, id: raw.id } : node;
     });
-    await this.episodicNodeRepository.saveBulk(episodicNodes);
 
-    // 4. Extract nodes in parallel (chunking + per-chunk LLM + dedup-by-name
-    // are owned by NodeExtractionService). Edges are extracted later in step 11.
-    const extractedNodesPerEpisode = await withConcurrency(
+    // 4. Chunk each episode once, then extract nodes in parallel.
+    const chunksPerEpisode = episodicNodes.map((ep) =>
+      prepareChunks(ep.content, ep.source),
+    );
+
+    const nodeExtractions = await withConcurrency(
       LLM_CONCURRENCY_LIMIT,
       episodicNodes.map(
         (ep, i) => () =>
           this.nodeExtractionService.extractNodes(
             model,
             ep,
+            chunksPerEpisode[i],
             prevEpisodesPerEpisode[i],
             entityTypes,
             customInstructions,
@@ -374,6 +380,10 @@ export class EpisodeService {
             { ...ctx, metadata: { ...ctx.metadata, episodeId: ep.id } },
           ),
       ),
+    );
+    const extractedNodesPerEpisode = nodeExtractions.map((r) => r.nodes);
+    const chunkIndicesByNodeIdPerEpisode = nodeExtractions.map(
+      (r) => r.chunkIndicesByNodeId,
     );
 
     // 5. Embed all extracted nodes (batch)
@@ -384,16 +394,9 @@ export class EpisodeService {
       extractedNodesPerEpisode.map((a) => a.length),
     );
 
-    // 6. Collect search-based node candidates per episode
-    const graphIds = [...new Set(episodes.map((e) => e.graphId))];
-    const candidatesPerEpisode = await Promise.all(
-      embeddedPerEpisode.map((nodes, i) =>
-        this.nodeResolutionService.collectCandidates(nodes, episodicNodes[i].graphId),
-      ),
-    );
-    const existingNodesMap = new Map(candidatesPerEpisode.flat().map((n) => [n.id, n]));
-
-    // 7. Pass 1 - resolve nodes vs live graph in parallel
+    // 6. Pass 1 - resolve nodes vs live graph in parallel. resolveNodes collects
+    // its own live-graph candidates and returns them; existingNodesMap aggregates
+    // them for the cross-batch dedup and canonical determination below.
     const nodeResolutions = await withConcurrency(
       LLM_CONCURRENCY_LIMIT,
       embeddedPerEpisode.map(
@@ -401,8 +404,9 @@ export class EpisodeService {
           this.nodeResolutionService.resolveNodes(
             model,
             episodicNodes[i],
+            chunksPerEpisode[i],
+            chunkIndicesByNodeIdPerEpisode[i],
             nodes,
-            candidatesPerEpisode[i],
             prevEpisodesPerEpisode[i],
             customInstructions,
             {
@@ -412,7 +416,6 @@ export class EpisodeService {
           ),
       ),
     );
-
     // 8. Merge duplicate pairs from pass 1
     const pass1Pairs: [Uuid, Uuid][] = nodeResolutions.flatMap((r) =>
       r.duplicatePairs.map((p): [Uuid, Uuid] => [p.extractedId, p.canonicalId]),
@@ -421,28 +424,33 @@ export class EpisodeService {
     // 9. Pass 2 - within-batch dedup. Owned by NodeResolutionService; canonical
     // pool is seeded with matched-existing nodes so a new node Y can collapse
     // onto existing X even when X wasn't in Y's own candidate set.
+    const existingNodesMap = new Map(
+      nodeResolutions.flatMap((r) => r.candidates).map((n) => [n.id, n]),
+    );
     const allNewNodes = nodeResolutions.flatMap((r) => r.resolvedNodes);
+
     const matchedExistingIds = new Set(
       nodeResolutions.flatMap((r) => r.duplicatePairs.map((p) => p.canonicalId)),
     );
     const matchedExistingNodes = [...matchedExistingIds]
       .map((id) => existingNodesMap.get(id))
       .filter((n): n is NonNullable<typeof n> => n !== undefined);
+
     const pass2Pairs = this.nodeResolutionService.dedupeAcrossBatch(
       allNewNodes,
       matchedExistingNodes,
     );
 
-    const finalIdMap = buildDirectedIdMap([...pass1Pairs, ...pass2Pairs]);
+    const canonicalIdByNodeId = buildDirectedIdMap([...pass1Pairs, ...pass2Pairs]);
 
     // 10. Determine canonical nodes per episode
     const canonicalNodesPerEpisode = nodeResolutions.map((resolution) => {
       const ownCanonical = resolution.resolvedNodes.filter(
-        (n) => (finalIdMap.get(n.id) ?? n.id) === n.id,
+        (n) => (canonicalIdByNodeId.get(n.id) ?? n.id) === n.id,
       );
       const matchedExisting = resolution.duplicatePairs
         .map((p) => {
-          const canonical = finalIdMap.get(p.canonicalId) ?? p.canonicalId;
+          const canonical = canonicalIdByNodeId.get(p.canonicalId) ?? p.canonicalId;
           return existingNodesMap.get(canonical);
         })
         .filter((n): n is NonNullable<typeof n> => n !== undefined);
@@ -457,13 +465,14 @@ export class EpisodeService {
 
     // 11. Extract edges in parallel using the canonical nodes resolved above,
     // then resolve pointers.
-    const rawEdgesPerEpisode = await withConcurrency(
+    const edgeExtractions = await withConcurrency(
       LLM_CONCURRENCY_LIMIT,
       episodicNodes.map(
         (ep, i) => () =>
           this.edgeExtractionService.extractEdges(
             model,
             ep,
+            chunksPerEpisode[i],
             canonicalNodesPerEpisode[i],
             prevEpisodesPerEpisode[i],
             ep.validAt,
@@ -474,9 +483,19 @@ export class EpisodeService {
           ),
       ),
     );
+    const rawEdgesPerEpisode = edgeExtractions.map((r) => r.edges);
+    // Edge chunk sources keyed by edge id, qualified by origin episode index so a
+    // cross-episode-merged edge resolves against the chunks it actually came from.
+    // Edge IDs are stable through pointer remap, embed, and dedup.
+    const chunkSources: EdgeChunkSources = new Map();
+    edgeExtractions.forEach((r, i) => {
+      for (const [id, indices] of r.chunkIndicesByEdgeId) {
+        chunkSources.set(id, { episodeIndex: i, indices });
+      }
+    });
 
     const pointedEdgesPerEpisode = rawEdgesPerEpisode.map((edges) =>
-      resolveEdgePointers(edges, finalIdMap),
+      resolveEdgePointers(edges, canonicalIdByNodeId),
     );
 
     // 12. Embed all extracted edges (batch)
@@ -487,36 +506,45 @@ export class EpisodeService {
       pointedEdgesPerEpisode.map((a) => a.length),
     );
 
-    // 13. Cross-batch edge dedup. Without this, two batch episodes that mention
-    // the same fact would each be resolved against the live graph independently
-    // and both persist as separate rows. Mirrors upstream `dedupe_edges_bulk`.
-    const dedupedEdgesPerEpisode = await this.edgeResolutionService.dedupeAcrossBatch(
+    // 13. Cross-batch edge dedup. Returns the flat set of distinct
+    // canonical edges. Mirrors upstream `dedupe_edges_bulk`.
+    const canonicalEdges = await this.edgeResolutionService.dedupeAcrossBatch(
       model,
       embeddedEdgesPerEpisode,
       episodicNodes,
+      chunksPerEpisode,
+      chunkSources,
       prevEpisodesPerEpisode,
       customInstructions,
       ctx,
     );
 
-    // 14. Collect search-based edge candidates per episode
-    const edgeCandidatesPerEpisode = await Promise.all(
-      dedupedEdgesPerEpisode.map((edges, i) =>
-        this.edgeResolutionService.collectCandidates(edges, episodicNodes[i].graphId),
-      ),
-    );
+    // 14. Route each canonical edge to its ORIGIN episode so it is resolved
+    // exactly once, against the episode whose validAt / previousEpisodes / chunk
+    // text actually produced it.
+    const edgesByOriginEpisode: EntityEdge[][] = episodicNodes.map(() => []);
 
-    // 15. Resolve edges in parallel
+    for (const edge of canonicalEdges) {
+      const source = chunkSources.get(edge.id);
+      if (!source) {
+        throw new Error(`resolveEdges partition: edge ${edge.id} has no chunk source`);
+      }
+      edgesByOriginEpisode[source.episodeIndex].push(edge);
+    }
+
+    // 15. Resolve edges per origin episode. Candidates are collected from the
+    // live graph inside resolveEdges.
     const edgeResolutions = await withConcurrency(
       LLM_CONCURRENCY_LIMIT,
       episodicNodes.map(
         (ep, i) => () =>
           this.edgeResolutionService.resolveEdges(
             model,
-            ep,
-            dedupedEdgesPerEpisode[i],
-            edgeCandidatesPerEpisode[i],
-            finalIdMap,
+            episodicNodes,
+            chunksPerEpisode,
+            chunkSources,
+            edgesByOriginEpisode[i],
+            canonicalIdByNodeId,
             ep.validAt,
             prevEpisodesPerEpisode[i],
             customInstructions,
@@ -525,40 +553,24 @@ export class EpisodeService {
       ),
     );
 
-    const allResolvedEdges = edgeResolutions.flatMap((r) => r.resolvedEdges);
-    const allInvalidatedEdges = edgeResolutions.flatMap((r) => r.invalidatedEdges);
     // Freshly extracted edges (no existing duplicate). Attribute extraction
     // runs only over these so that re-matched existing edges aren't re-LLM'd
     // and don't get prior attributes overwritten by a thinner new episode.
+    // TODO: let edges accumulate attributes from new episodes with smart
+    // merge logic
     const allNewEdges = edgeResolutions.flatMap((r) => r.newEdges);
 
-    // 16. Build per-node and per-edge episode context for the helpers below
-    const allCanonicalNodes = [
-      ...new Map(canonicalNodesPerEpisode.flat().map((n) => [n.id, n])).values(),
-    ];
-    const newNodesOnly = allCanonicalNodes.filter((n) => !existingNodesMap.has(n.id));
-
-    const nodeContext = new Map<
-      Uuid,
-      { episode: EpisodicNode; previousEpisodes: EpisodicNode[] }
-    >();
-    canonicalNodesPerEpisode.forEach((nodes, i) => {
-      for (const n of nodes) {
-        if (!nodeContext.has(n.id)) {
-          nodeContext.set(n.id, {
-            episode: episodicNodes[i],
-            previousEpisodes: prevEpisodesPerEpisode[i],
-          });
-        }
-      }
-    });
-
+    // 16. Edge reference-time context for the edge helpers below.
     const edgeContext = new Map<Uuid, { referenceTime: Date }>();
     edgeResolutions.forEach((res, epIndex) => {
       for (const edge of res.resolvedEdges) {
         edgeContext.set(edge.id, { referenceTime: episodicNodes[epIndex].validAt });
       }
     });
+
+    const allCanonicalNodes = [
+      ...new Map(canonicalNodesPerEpisode.flat().map((n) => [n.id, n])).values(),
+    ];
 
     // 17. Fill edge attributes post-resolution (custom edge types). Only
     // new edges - existing duplicates already carry attributes from prior
@@ -581,6 +593,19 @@ export class EpisodeService {
       allNewEdges,
       edgeContext,
       ctx,
+    );
+
+    // Resolved edges (new + matched) provide fact context for entity attributes.
+    const allResolvedEdges = edgeResolutions.flatMap((r) => r.resolvedEdges);
+
+    // Per-node episode context (chunks + chunk indices) for the node helpers below.
+    const nodeContext = buildNodeContext(
+      canonicalNodesPerEpisode,
+      chunkIndicesByNodeIdPerEpisode,
+      canonicalIdByNodeId,
+      episodicNodes,
+      prevEpisodesPerEpisode,
+      chunksPerEpisode,
     );
 
     // 18. Fill entity attributes post-resolution (with resolved-edge context).
@@ -613,13 +638,11 @@ export class EpisodeService {
     );
 
     // 20. Re-embed canonical nodes renamed during dedup. Resolution rewrites
-    // node.name and nulls nameEmbedding (stale vector) - if we don't refill
-    // them here, those rows save with NULL embeddings and become invisible to
-    // vector search until the next time they're touched.
+    // node.name and nulls nameEmbedding (stale vector)
     const renamedNodes = allCanonicalNodes.filter((n) => n.nameEmbedding === null);
     if (renamedNodes.length > 0) {
-      const reembedded = await this.embeddingService.embedNodes(renamedNodes);
-      const byId = new Map(reembedded.map((n) => [n.id, n]));
+      const reEmbedded = await this.embeddingService.embedNodes(renamedNodes);
+      const byId = new Map(reEmbedded.map((n) => [n.id, n]));
 
       for (let i = 0; i < allCanonicalNodes.length; i++) {
         const fresh = byId.get(allCanonicalNodes[i].id);
@@ -639,9 +662,11 @@ export class EpisodeService {
     );
     const allEpisodicEdges = episodicEdgesPerEpisode.flat();
 
+    // Edges contradicted by this batch, re-saved with updated invalidAt/expiredAt.
+    const allInvalidatedEdges = edgeResolutions.flatMap((r) => r.invalidatedEdges);
+
     // 22. Persist: nodes first, then edges. Postgres FK constraints reject
-    // edges whose endpoints don't yet exist; Neo4j silently no-op'd these via
-    // MATCH...MERGE, which masked the ordering bug.
+    // edges whose endpoints don't yet exist;
     await Promise.all([
       this.entityNodeRepository.saveBulk(allCanonicalNodes),
       this.episodicNodeRepository.saveBulk(episodicNodes),
@@ -695,6 +720,8 @@ export class EpisodeService {
     // 24. Optional community maintenance per distinct graphId. The maintenance
     //      service routes each graph to a debounced full rebuild or the
     //      incremental update path based on its size.
+    const graphIds = [...new Set(episodes.map((e) => e.graphId))];
+
     if (updateCommunities) {
       for (const gid of graphIds) {
         const entityIds = allCanonicalNodes
@@ -732,7 +759,8 @@ export class EpisodeService {
         'graph.ids': graphIds.join(','),
         'node.count.extracted': allExtractedNodes.length,
         'node.count.canonical': allCanonicalNodes.length,
-        'node.count.new': newNodesOnly.length,
+        'node.count.new': allCanonicalNodes.filter((n) => !existingNodesMap.has(n.id))
+          .length,
         'edge.count.extracted': allExtractedEdges.length,
         'edge.count.resolved': allResolvedEdges.length,
         'edge.count.invalidated': allInvalidatedEdges.length,
