@@ -1,15 +1,27 @@
 import { z } from 'zod';
 
-import { UuidSchema } from '@/common/schemas';
+import { Uuid, UuidSchema } from '@/common/schemas';
 
 import {
+  EntityEdge,
   EntityEdgeSchema,
+  EntityNode,
   EntityNodeSchema,
+  EpisodicEdge,
   EpisodicEdgeSchema,
+  EpisodicNode,
   EpisodicNodeSchema,
+  HasEpisodeEdge,
+  SagaNode,
 } from '../../models';
+import type {
+  EdgeChunkSources,
+  EdgeResolutionResult,
+  NodeResolutionResult,
+} from '../../resolution/types';
 import {
   EpisodeType,
+  NodeLabel,
   NodeLabelSchema,
   NodeNameSchema,
   RelationshipTypeSchema,
@@ -189,3 +201,70 @@ export type NormalizedAddEpisodeOptions = z.infer<
   typeof NormalizedAddEpisodeOptionsSchema
 >;
 export type AddEpisodeResult = z.infer<typeof AddEpisodeResultSchema>;
+
+// ─── Internal ingestion pipeline contracts ─────────────────────────────────
+//
+// Not exposed to callers. `addEpisodesImpl` runs as a sequence of phases that
+// thread these structures; they are kept disjoint from the public DTOs above.
+// `EpisodeWorkItem` holds everything scoped to ONE episode (Option B per-item
+// pipeline); `BatchState` holds graph-global identity state that cannot belong
+// to any single item because cross-batch dedup severs the episode->entity link.
+
+/**
+ * Read-only, caller-derived configuration threaded through every phase.
+ * Distinct from `BatchState`: this is immutable input, not accumulated state.
+ */
+export interface PipelineConfig {
+  entityTypes?: EntityTypeMap;
+  edgeTypes?: EdgeTypeMap;
+  effectiveEdgeTypeMappings?: EdgeTypeMappings;
+  excludedEntityTypes?: NodeLabel[];
+  customInstructions?: string;
+  updateCommunities?: boolean;
+}
+
+/**
+ * Per-episode working set. Readonly fields are set in `preparePhase`; the rest
+ * are filled in place by the phase that owns them (the embed scatter-back and
+ * resolution writes). Collection fields start empty so the struct is fully
+ * typed from construction; `hasEpisodeEdge` is genuinely absent unless the
+ * episode declares a `sagaId`.
+ */
+export interface EpisodeWorkItem {
+  readonly node: EpisodicNode;
+  readonly chunks: string[];
+  readonly prevEpisodes: EpisodicNode[];
+  readonly sagaId?: Uuid;
+
+  // Nodes phase
+  extractedNodes: EntityNode[];
+  chunkIndicesByNodeId: Map<Uuid, Set<number>>;
+  resolution: NodeResolutionResult;
+  canonicalNodes: EntityNode[]; // object refs shared with BatchState.canonicalNodes
+
+  // Edges phase
+  rawEdges: EntityEdge[];
+  chunkIndicesByEdgeId: Map<Uuid, Set<number>>;
+  edgesFromThisEpisode: EntityEdge[]; // routed back after cross-batch dedup
+  edgeResolution: EdgeResolutionResult;
+
+  // Enrich phase (objects constructed here, persisted in persistPhase)
+  episodicEdges: EpisodicEdge[];
+  hasEpisodeEdge?: HasEpisodeEdge;
+}
+
+/**
+ * Graph-global identity state, written once by its producing phase and read
+ * after. These structures span episodes by construction and have no per-item
+ * home: `canonicalIdByNodeId` remaps ids across episodes, `nodeRegistry`
+ * materialises canonical node objects by id, `chunkSources` recovers an edge's
+ * origin episode after the cross-batch merge discarded it.
+ */
+export interface BatchState {
+  canonicalIdByNodeId: Map<Uuid, Uuid>;
+  nodeRegistry: Map<Uuid, EntityNode>;
+  existingNodeIds: Set<Uuid>; // live-graph candidate ids only -> "new node" metric
+  chunkSources: EdgeChunkSources;
+  canonicalNodes: EntityNode[]; // authoritative deduped union; same refs as items[].canonicalNodes
+  sagaNodes: SagaNode[]; // one per distinct sagaId; built in enrich, upserted in persist
+}
