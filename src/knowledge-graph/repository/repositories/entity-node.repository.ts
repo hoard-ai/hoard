@@ -39,8 +39,9 @@ export class EntityNodeRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   @Span()
-  async save(node: EntityNode): Promise<string> {
-    await this.prisma.$executeRaw`
+  async save(node: EntityNode, tx?: Prisma.TransactionClient): Promise<string> {
+    const db = tx ?? this.prisma;
+    await db.$executeRaw`
       INSERT INTO entity_nodes (id, graph_id, name, summary, attributes, labels, name_embedding, created_at)
       VALUES (
         ${node.id}::uuid,
@@ -64,13 +65,13 @@ export class EntityNodeRepository {
   }
 
   @Span()
-  async saveBulk(nodes: EntityNode[]): Promise<void> {
+  async saveBulk(nodes: EntityNode[], tx?: Prisma.TransactionClient): Promise<void> {
     if (nodes.length === 0) return;
     // Sequential single-row UPSERTs keep parameter binding simple and stay
     // within Postgres' bind-parameter limit on large batches. The save() above
     // is itself a single round trip; bulk amortizes only client-side overhead.
     for (const node of nodes) {
-      await this.save(node);
+      await this.save(node, tx);
     }
   }
 

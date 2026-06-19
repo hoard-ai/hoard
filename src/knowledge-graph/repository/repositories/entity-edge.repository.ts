@@ -43,8 +43,9 @@ export class EntityEdgeRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   @Span()
-  async save(edge: EntityEdge): Promise<string> {
-    await this.prisma.$executeRaw`
+  async save(edge: EntityEdge, tx?: Prisma.TransactionClient): Promise<string> {
+    const db = tx ?? this.prisma;
+    await db.$executeRaw`
       INSERT INTO entity_edges (
         id, graph_id, source_id, target_id, name, fact,
         fact_embedding, attributes, episodes, valid_at, invalid_at, expired_at, created_at
@@ -80,10 +81,10 @@ export class EntityEdgeRepository {
   }
 
   @Span()
-  async saveBulk(edges: EntityEdge[]): Promise<void> {
+  async saveBulk(edges: EntityEdge[], tx?: Prisma.TransactionClient): Promise<void> {
     if (edges.length === 0) return;
     for (const edge of edges) {
-      await this.save(edge);
+      await this.save(edge, tx);
     }
   }
 

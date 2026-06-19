@@ -11,8 +11,7 @@ import {
   EpisodicEdgeSchema,
   EpisodicNode,
   EpisodicNodeSchema,
-  HasEpisodeEdge,
-  SagaNode,
+  Saga,
 } from '../../models';
 import type {
   EdgeChunkSources,
@@ -30,6 +29,11 @@ import {
 // Constants
 
 export const PREVIOUS_EPISODES_WINDOW = 20;
+
+// persistPhase wraps the batch's writes in one interactive transaction. Prisma's
+// default 5s timeout is too low for large batches of per-row upserts.
+export const PERSIST_TRANSACTION_TIMEOUT_MS = 10_000;
+export const PERSIST_TRANSACTION_MAX_WAIT_MS = 7_000;
 
 // ─── Per-ingestion-path input schemas ──────────────────────────────────────
 //
@@ -227,8 +231,7 @@ export interface PipelineConfig {
  * Per-episode working set. Readonly fields are set in `preparePhase`; the rest
  * are filled in place by the phase that owns them (the embed scatter-back and
  * resolution writes). Collection fields start empty so the struct is fully
- * typed from construction; `hasEpisodeEdge` is genuinely absent unless the
- * episode declares a `sagaId`.
+ * typed from construction. The episode->saga link rides on `node.sagaId`.
  */
 export interface EpisodeWorkItem {
   readonly node: EpisodicNode;
@@ -250,7 +253,6 @@ export interface EpisodeWorkItem {
 
   // Enrich phase (objects constructed here, persisted in persistPhase)
   episodicEdges: EpisodicEdge[];
-  hasEpisodeEdge?: HasEpisodeEdge;
 }
 
 /**
@@ -266,5 +268,5 @@ export interface BatchState {
   existingNodeIds: Set<Uuid>; // live-graph candidate ids only -> "new node" metric
   chunkSources: EdgeChunkSources;
   canonicalNodes: EntityNode[]; // authoritative deduped union; same refs as items[].canonicalNodes
-  sagaNodes: SagaNode[]; // one per distinct sagaId; built in enrich, upserted in persist
+  sagas: Saga[]; // one per distinct sagaId; built in enrich, upserted in persist
 }

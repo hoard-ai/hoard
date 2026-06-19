@@ -6,8 +6,7 @@ import {
   EntityNodeRepository,
   EpisodicEdgeRepository,
   EpisodicNodeRepository,
-  HasEpisodeEdgeRepository,
-  SagaNodeRepository,
+  SagaRepository,
 } from './repositories';
 
 const repositories = [
@@ -16,8 +15,7 @@ const repositories = [
   EntityEdgeRepository,
   EpisodicNodeRepository,
   EpisodicEdgeRepository,
-  SagaNodeRepository,
-  HasEpisodeEdgeRepository,
+  SagaRepository,
 ];
 
 // PrismaModule is @Global() - no explicit import needed.

@@ -27,18 +27,16 @@ export const EntityEdgeSchema = EdgeBaseSchema.extend({
   attributes: z.record(z.string(), z.unknown()).default({}),
 });
 
-// EpisodicEdge  = MENTIONS         (Episodic -> Entity)
-// HasEpisodeEdge = HAS_EPISODE     (Saga      -> Episodic)
-// Community membership is stored as `Community.memberIds UUID[]`, not as edges.
+// EpisodicEdge = MENTIONS (Episodic -> Entity).
+// Saga membership is stored as `EpisodicNode.sagaId`, and Community membership
+// as `Community.memberIds UUID[]` - neither is modeled as edges.
 export const EpisodicEdgeSchema = EdgeBaseSchema;
-export const HasEpisodeEdgeSchema = EdgeBaseSchema;
 
 // Types
 
 export type EdgeBase = z.infer<typeof EdgeBaseSchema>;
 export type EntityEdge = z.infer<typeof EntityEdgeSchema>;
 export type EpisodicEdge = z.infer<typeof EpisodicEdgeSchema>;
-export type HasEpisodeEdge = z.infer<typeof HasEpisodeEdgeSchema>;
 
 // Factories
 
@@ -75,14 +73,4 @@ export function createEpisodicEdge(
   },
 ): EpisodicEdge {
   return EpisodicEdgeSchema.parse({ ...createEdgeDefaults(), ...partial });
-}
-
-export function createHasEpisodeEdge(
-  partial: Partial<HasEpisodeEdge> & {
-    graphId: Uuid;
-    sourceNodeId: Uuid;
-    targetNodeId: Uuid;
-  },
-): HasEpisodeEdge {
-  return HasEpisodeEdgeSchema.parse({ ...createEdgeDefaults(), ...partial });
 }

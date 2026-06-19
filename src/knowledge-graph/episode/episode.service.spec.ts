@@ -5,6 +5,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { Uuid, UuidSchema } from '@/common/schemas';
 import { LlmService } from '@/llm/llm.service';
 import { LLM_TRACER, NoOpLlmTracer } from '@/observability';
+import { PrismaService } from '@/providers/database/postgres/prisma.service';
 import {
   KG_REFERENCE_TIME,
   KG_TEST_GRAPH_ID,
@@ -25,8 +26,7 @@ import {
   EntityNodeRepository,
   EpisodicEdgeRepository,
   EpisodicNodeRepository,
-  HasEpisodeEdgeRepository,
-  SagaNodeRepository,
+  SagaRepository,
 } from '../repository/repositories';
 import { EdgeResolutionService, NodeResolutionService } from '../resolution';
 import { EpisodeService } from './episode.service';
@@ -61,8 +61,8 @@ describe('EpisodeService', () => {
   let mockEntityEdgeRepo: DeepMocked<EntityEdgeRepository>;
   let mockEpisodicNodeRepo: DeepMocked<EpisodicNodeRepository>;
   let mockEpisodicEdgeRepo: DeepMocked<EpisodicEdgeRepository>;
-  let mockSagaNodeRepo: DeepMocked<SagaNodeRepository>;
-  let mockHasEpisodeEdgeRepo: DeepMocked<HasEpisodeEdgeRepository>;
+  let mockSagaRepo: DeepMocked<SagaRepository>;
+  let mockPrisma: DeepMocked<PrismaService>;
 
   let mockModel: DeepMocked<BaseChatModel>;
   let mockRunnable: { invoke: jest.Mock };
@@ -86,12 +86,18 @@ describe('EpisodeService', () => {
     mockEntityEdgeRepo = module.get(EntityEdgeRepository);
     mockEpisodicNodeRepo = module.get(EpisodicNodeRepository);
     mockEpisodicEdgeRepo = module.get(EpisodicEdgeRepository);
-    mockSagaNodeRepo = module.get(SagaNodeRepository);
-    mockHasEpisodeEdgeRepo = module.get(HasEpisodeEdgeRepository);
+    mockSagaRepo = module.get(SagaRepository);
+    mockPrisma = module.get(PrismaService);
 
     mockModel = createMock<BaseChatModel>();
     mockRunnable = { invoke: jest.fn() };
     mockModel.withStructuredOutput.mockReturnValue(mockRunnable as never);
+
+    // persistPhase wraps writes in prisma.$transaction; run the callback so the
+    // repo mocks below are actually invoked (the dummy tx is ignored by them).
+    mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
+      Promise.resolve(fn({})),
+    );
 
     // Default mock implementations
     mockLlmService.getActiveModel.mockResolvedValue(mockModel);
@@ -502,7 +508,10 @@ describe('EpisodeService', () => {
   // ─── Saga handling per episode (sagaId) ─────────────────────────────────
 
   describe('addEpisodes - saga handling', () => {
-    it('creates SagaNode and HasEpisodeEdge when sagaId is provided', async () => {
+    const savedEpisodes = () =>
+      mockEpisodicNodeRepo.saveBulk.mock.calls.flatMap(([nodes]) => nodes);
+
+    it('creates Saga and tags the episode with sagaId when provided', async () => {
       const ep = makeEpisode('ep1');
       ep.sagaId = KG_TEST_SAGA_ID;
 
@@ -511,32 +520,30 @@ describe('EpisodeService', () => {
         episodes: [ep],
       });
 
-      expect(mockSagaNodeRepo.createIfNotExists).toHaveBeenCalledWith(
+      expect(mockSagaRepo.createIfNotExists).toHaveBeenCalledWith(
         expect.objectContaining({
           id: KG_TEST_SAGA_ID,
           graphId: KG_TEST_GRAPH_ID,
         }),
+        expect.anything(),
       );
-      expect(mockHasEpisodeEdgeRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sourceNodeId: KG_TEST_SAGA_ID,
-          graphId: KG_TEST_GRAPH_ID,
-        }),
-      );
+      expect(savedEpisodes()).toEqual([
+        expect.objectContaining({ sagaId: KG_TEST_SAGA_ID }),
+      ]);
     });
 
-    it('skips saga handling when sagaId is omitted', async () => {
+    it('leaves sagaId null and skips saga node when sagaId is omitted', async () => {
       await service.addTextEpisodes({
         userId: KG_TEST_USER_ID,
         episodes: [makeEpisode('ep1')],
       });
 
-      expect(mockSagaNodeRepo.createIfNotExists).not.toHaveBeenCalled();
-      expect(mockSagaNodeRepo.save).not.toHaveBeenCalled();
-      expect(mockHasEpisodeEdgeRepo.save).not.toHaveBeenCalled();
+      expect(mockSagaRepo.createIfNotExists).not.toHaveBeenCalled();
+      expect(mockSagaRepo.save).not.toHaveBeenCalled();
+      expect(savedEpisodes()).toEqual([expect.objectContaining({ sagaId: null })]);
     });
 
-    it('processes saga linking for each episode in the batch that has a sagaId', async () => {
+    it('groups saga nodes and tags each saga-bearing episode in the batch', async () => {
       const ep1 = makeEpisode('ep1');
       ep1.sagaId = KG_TEST_SAGA_ID;
       const ep2 = makeEpisode('ep2'); // no saga
@@ -548,10 +555,12 @@ describe('EpisodeService', () => {
         episodes: [ep1, ep2, ep3],
       });
 
-      // SagaNode createIfNotExists is called once per unique saga (grouped),
-      // HAS_EPISODE edges once per saga-bearing episode.
-      expect(mockSagaNodeRepo.createIfNotExists).toHaveBeenCalledTimes(1);
-      expect(mockHasEpisodeEdgeRepo.save).toHaveBeenCalledTimes(2);
+      // Saga createIfNotExists is called once per unique saga (grouped);
+      // each saga-bearing episode carries the sagaId, the other stays null.
+      expect(mockSagaRepo.createIfNotExists).toHaveBeenCalledTimes(1);
+      const sagaIds = savedEpisodes().map((n) => n.sagaId);
+      expect(sagaIds.filter((id) => id === KG_TEST_SAGA_ID)).toHaveLength(2);
+      expect(sagaIds.filter((id) => id === null)).toHaveLength(1);
     });
   });
 

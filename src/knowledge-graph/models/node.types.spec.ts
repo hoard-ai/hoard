@@ -10,11 +10,11 @@ import {
   createEntityNode,
   createEpisodicNode,
   createNodeDefaults,
-  createSagaNode,
+  createSaga,
   EntityNodeSchema,
   EpisodicNodeSchema,
   NodeBaseSchema,
-  SagaNodeSchema,
+  SagaSchema,
 } from './node.types';
 
 const n = (s: string) => NodeNameSchema.parse(s);
@@ -397,10 +397,10 @@ describe('Community', () => {
   });
 });
 
-describe('SagaNode', () => {
-  describe('createSagaNode', () => {
+describe('Saga', () => {
+  describe('createSaga', () => {
     it('should create with correct defaults', () => {
-      const node = createSagaNode({
+      const node = createSaga({
         name: n('Saga 1'),
         graphId: KG_TEST_GRAPH_ID,
       });
@@ -413,16 +413,16 @@ describe('SagaNode', () => {
 
     it('should allow overriding graphId', () => {
       const graphId = UuidSchema.parse('00000000-0000-4000-8000-000000000001');
-      const node = createSagaNode({ name: n('Saga'), graphId });
+      const node = createSaga({ name: n('Saga'), graphId });
       expect(node.graphId).toBe('00000000-0000-4000-8000-000000000001');
     });
 
     it('should generate unique ids', () => {
-      const node1 = createSagaNode({
+      const node1 = createSaga({
         name: n('Saga1'),
         graphId: KG_TEST_GRAPH_ID,
       });
-      const node2 = createSagaNode({
+      const node2 = createSaga({
         name: n('Saga2'),
         graphId: KG_TEST_GRAPH_ID,
       });
@@ -430,18 +430,18 @@ describe('SagaNode', () => {
     });
   });
 
-  describe('SagaNodeSchema', () => {
+  describe('SagaSchema', () => {
     it('should accept valid saga node', () => {
-      const node = createSagaNode({
+      const node = createSaga({
         name: n('Saga'),
         graphId: KG_TEST_GRAPH_ID,
       });
-      expect(() => SagaNodeSchema.parse(node)).not.toThrow();
+      expect(() => SagaSchema.parse(node)).not.toThrow();
     });
 
     it('should reject missing name', () => {
       expect(() =>
-        SagaNodeSchema.parse({
+        SagaSchema.parse({
           id: randomUUID(),
           graphId: KG_TEST_GRAPH_ID,
           createdAt: new Date(),
@@ -450,19 +450,19 @@ describe('SagaNode', () => {
     });
 
     it('should reject empty graphId', () => {
-      const node = createSagaNode({
+      const node = createSaga({
         name: n('Saga'),
         graphId: KG_TEST_GRAPH_ID,
       });
-      expect(() => SagaNodeSchema.parse({ ...node, graphId: '' })).toThrow();
+      expect(() => SagaSchema.parse({ ...node, graphId: '' })).toThrow();
     });
 
     it('should reject invalid id', () => {
-      const node = createSagaNode({
+      const node = createSaga({
         name: n('Saga'),
         graphId: KG_TEST_GRAPH_ID,
       });
-      expect(() => SagaNodeSchema.parse({ ...node, id: 'not-a-uuid' })).toThrow();
+      expect(() => SagaSchema.parse({ ...node, id: 'not-a-uuid' })).toThrow();
     });
   });
 });

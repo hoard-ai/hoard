@@ -12,6 +12,7 @@ import {
   Span,
   type SpanMetrics,
 } from '@/observability';
+import { PrismaService } from '@/providers/database/postgres/prisma.service';
 
 import {
   buildDirectedIdMap,
@@ -26,11 +27,9 @@ import { EdgeExtractionService, NodeExtractionService } from '../extraction';
 import {
   createEpisodicEdge,
   createEpisodicNode,
-  createHasEpisodeEdge,
-  createSagaNode,
+  createSaga,
   EntityNode,
   EpisodicNode,
-  HasEpisodeEdge,
 } from '../models';
 import { buildSummarizeSagasMessages, SagaSummarySchema } from '../prompts';
 import {
@@ -38,8 +37,7 @@ import {
   EntityNodeRepository,
   EpisodicEdgeRepository,
   EpisodicNodeRepository,
-  HasEpisodeEdgeRepository,
-  SagaNodeRepository,
+  SagaRepository,
 } from '../repository';
 import { EdgeResolutionService, NodeResolutionService } from '../resolution';
 import {
@@ -61,6 +59,8 @@ import {
   BatchState,
   EpisodeWorkItem,
   NormalizedAddEpisodeOptions,
+  PERSIST_TRANSACTION_MAX_WAIT_MS,
+  PERSIST_TRANSACTION_TIMEOUT_MS,
   PipelineConfig,
   PREVIOUS_EPISODES_WINDOW,
 } from './types';
@@ -79,8 +79,8 @@ export class EpisodeService {
     private readonly entityEdgeRepository: EntityEdgeRepository,
     private readonly episodicNodeRepository: EpisodicNodeRepository,
     private readonly episodicEdgeRepository: EpisodicEdgeRepository,
-    private readonly sagaNodeRepository: SagaNodeRepository,
-    private readonly hasEpisodeEdgeRepository: HasEpisodeEdgeRepository,
+    private readonly sagaRepository: SagaRepository,
+    private readonly prisma: PrismaService,
     @Inject(LLM_TRACER) private readonly llmTracer: LlmTracer,
   ) {}
 
@@ -201,7 +201,7 @@ export class EpisodeService {
 
     const model = await this.llmService.getActiveModel(userId);
 
-    const saga = await this.sagaNodeRepository.getById(sagaId);
+    const saga = await this.sagaRepository.getById(sagaId);
     if (!saga) {
       throw new Error(`Saga not found: ${sagaId}`);
     }
@@ -245,7 +245,7 @@ export class EpisodeService {
       summary: result.summary,
       lastSummarizedAt: new Date(),
     };
-    await this.sagaNodeRepository.save(updatedSaga);
+    await this.sagaRepository.save(updatedSaga);
 
     return {
       summary: updatedSaga.summary,
@@ -445,6 +445,7 @@ export class EpisodeService {
         sourceDescription: raw.sourceDescription,
         graphId: raw.graphId,
         validAt: raw.referenceTime,
+        sagaId: raw.sagaId ?? null,
       });
       const node = raw.id ? { ...base, id: raw.id } : base;
 
@@ -476,7 +477,7 @@ export class EpisodeService {
       existingNodeIds: new Set(),
       chunkSources: new Map(),
       canonicalNodes: [],
-      sagaNodes: [],
+      sagas: [],
     };
 
     return {
@@ -840,8 +841,9 @@ export class EpisodeService {
       });
     }
 
-    // Saga construction (in-memory only). One SagaNode per distinct sagaId; one
-    // HAS_EPISODE edge per episode that declares a saga. Persisted in persistPhase.
+    // Saga construction (in-memory only). One Saga per distinct sagaId;
+    // the episode->saga link rides on EpisodicNode.sagaId (set at item build).
+    // Persisted in persistPhase.
     const sagaGroups = new Map<Uuid, EpisodeWorkItem[]>();
     for (const it of items) {
       if (!it.sagaId) continue;
@@ -850,20 +852,13 @@ export class EpisodeService {
     for (const [sagaId, group] of sagaGroups) {
       // TODO: saga name defaults to the ID string. Plan: accept an optional
       // caller-provided name, otherwise let summarizeSaga generate one.
-      batch.sagaNodes.push(
-        createSagaNode({
+      batch.sagas.push(
+        createSaga({
           id: sagaId,
           name: NodeNameSchema.parse(sagaId),
           graphId: group[0].node.graphId,
         }),
       );
-      for (const it of group) {
-        it.hasEpisodeEdge = createHasEpisodeEdge({
-          sourceNodeId: sagaId,
-          targetNodeId: it.node.id,
-          graphId: it.node.graphId,
-        });
-      }
     }
 
     return {
@@ -878,9 +873,8 @@ export class EpisodeService {
 
   /**
    * Phase 5 - persist. Builds the MENTIONS edges, then writes everything in
-   * FK-correct order: entity + episodic + saga nodes first, then entity / episodic
-   * edges, then HAS_EPISODE edges last (they depend on both episodic and saga
-   * nodes existing).
+   * FK-correct order in a single transaction: sagas first (episodic nodes
+   * FK onto them via saga_id), then entity + episodic nodes, then entity / episodic edges.
    */
   @Span('persistPhase', { onResult: metricsOnResult })
   private async persistPhase(
@@ -896,40 +890,39 @@ export class EpisodeService {
         }),
       );
     });
-
     const allResolvedEdges = items.flatMap((it) => it.edgeResolution.resolvedEdges);
     const allInvalidatedEdges = items.flatMap((it) => it.edgeResolution.invalidatedEdges);
     const allEpisodicEdges = items.flatMap((it) => it.episodicEdges);
-    const hasEpisodeEdges = items
-      .map((it) => it.hasEpisodeEdge)
-      .filter((e): e is HasEpisodeEdge => e !== undefined);
 
-    // Nodes first. Postgres FK constraints reject edges whose endpoints don't
-    // yet exist. Saga nodes are upserts (may pre-exist from earlier batches).
-    await Promise.all([
-      this.entityNodeRepository.saveBulk(batch.canonicalNodes),
-      this.episodicNodeRepository.saveBulk(items.map((it) => it.node)),
-      ...batch.sagaNodes.map((saga) => this.sagaNodeRepository.createIfNotExists(saga)),
-    ]);
-
-    // Entity + episodic edges, then HAS_EPISODE edges (FK onto episodic + saga).
-    await Promise.all([
-      this.entityEdgeRepository.saveBulk(allResolvedEdges),
-      this.entityEdgeRepository.saveBulk(allInvalidatedEdges),
-      this.episodicEdgeRepository.saveBulk(allEpisodicEdges),
-    ]);
-    await Promise.all(
-      hasEpisodeEdges.map((edge) => this.hasEpisodeEdgeRepository.save(edge)),
+    // in FK order: sagas first (episodic nodes FK onto them),
+    // then entity + episodic nodes, then entity / episodic edges.
+    await this.prisma.$transaction(
+      async (tx) => {
+        for (const saga of batch.sagas) {
+          await this.sagaRepository.createIfNotExists(saga, tx);
+        }
+        await this.entityNodeRepository.saveBulk(batch.canonicalNodes, tx);
+        await this.episodicNodeRepository.saveBulk(
+          items.map((it) => it.node),
+          tx,
+        );
+        await this.entityEdgeRepository.saveBulk(allResolvedEdges, tx);
+        await this.entityEdgeRepository.saveBulk(allInvalidatedEdges, tx);
+        await this.episodicEdgeRepository.saveBulk(allEpisodicEdges, tx);
+      },
+      {
+        timeout: PERSIST_TRANSACTION_TIMEOUT_MS,
+        maxWait: PERSIST_TRANSACTION_MAX_WAIT_MS,
+      },
     );
 
     return {
       metrics: {
         'node.count.persisted': batch.canonicalNodes.length,
         'episode.count': items.length,
-        'saga.count': batch.sagaNodes.length,
+        'saga.count': batch.sagas.length,
         'edge.count.resolved': allResolvedEdges.length,
         'edge.count.invalidated': allInvalidatedEdges.length,
-        'hasEpisodeEdge.count': hasEpisodeEdges.length,
       },
     };
   }

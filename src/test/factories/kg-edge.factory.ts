@@ -1,10 +1,8 @@
 import {
   createEntityEdge,
   createEpisodicEdge,
-  createHasEpisodeEdge,
   EntityEdge,
   EpisodicEdge,
-  HasEpisodeEdge,
 } from '@/knowledge-graph/models';
 import { RelationshipTypeSchema } from '@/knowledge-graph/types';
 
@@ -28,15 +26,6 @@ export class KgEdgeFactory {
 
   static createEpisodicEdge(opts: Partial<EpisodicEdge> = {}): EpisodicEdge {
     return createEpisodicEdge({
-      graphId: KG_TEST_GRAPH_ID,
-      sourceNodeId: kgId(),
-      targetNodeId: kgId(),
-      ...opts,
-    });
-  }
-
-  static createHasEpisodeEdge(opts: Partial<HasEpisodeEdge> = {}): HasEpisodeEdge {
-    return createHasEpisodeEdge({
       graphId: KG_TEST_GRAPH_ID,
       sourceNodeId: kgId(),
       targetNodeId: kgId(),

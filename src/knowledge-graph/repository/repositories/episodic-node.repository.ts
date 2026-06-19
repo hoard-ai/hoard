@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 
-import { EpisodicNode as PrismaEpisodicNode } from '@generated/prisma/client';
+import { Prisma, EpisodicNode as PrismaEpisodicNode } from '@generated/prisma/client';
 
 import { Uuid } from '@/common/schemas';
 import { EpisodicNode } from '@/knowledge-graph/models';
@@ -27,6 +27,7 @@ type Row = Pick<
   | 'sourceDescription'
   | 'content'
   | 'validAt'
+  | 'sagaId'
   | 'createdAt'
 >;
 
@@ -35,8 +36,9 @@ export class EpisodicNodeRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   @Span()
-  async save(node: EpisodicNode): Promise<string> {
-    await this.prisma.episodicNode.upsert({
+  async save(node: EpisodicNode, tx?: Prisma.TransactionClient): Promise<string> {
+    const db = tx ?? this.prisma;
+    await db.episodicNode.upsert({
       where: { id: node.id },
       create: {
         id: node.id,
@@ -47,6 +49,7 @@ export class EpisodicNodeRepository {
         sourceDescription: node.sourceDescription,
         content: node.content,
         validAt: node.validAt,
+        sagaId: node.sagaId,
         createdAt: node.createdAt,
       },
       update: {
@@ -57,15 +60,16 @@ export class EpisodicNodeRepository {
         sourceDescription: node.sourceDescription,
         content: node.content,
         validAt: node.validAt,
+        sagaId: node.sagaId,
       },
     });
     return node.id;
   }
 
   @Span()
-  async saveBulk(nodes: EpisodicNode[]): Promise<void> {
+  async saveBulk(nodes: EpisodicNode[], tx?: Prisma.TransactionClient): Promise<void> {
     if (nodes.length === 0) return;
-    for (const node of nodes) await this.save(node);
+    for (const node of nodes) await this.save(node, tx);
   }
 
   @Span()
@@ -87,7 +91,7 @@ export class EpisodicNodeRepository {
         validAt: { lte: referenceTime },
         graphId: { in: graphIds },
         ...(source ? { source } : {}),
-        ...(sagaId ? { hasEpisodeEdges: { some: { sagaId: sagaId } } } : {}),
+        ...(sagaId ? { sagaId } : {}),
       },
       orderBy: [{ validAt: 'desc' }, { createdAt: 'desc' }],
       take: lastN,
@@ -118,6 +122,7 @@ export class EpisodicNodeRepository {
              en.source_description AS "sourceDescription",
              en.content,
              en.valid_at           AS "validAt",
+             en.saga_id            AS "sagaId",
              en.created_at         AS "createdAt",
              ts_rank_cd(en.fts_vector, ${tsquery}, ${FTS_NORM_LOG_LENGTH}) AS score
       FROM episodic_nodes en
@@ -160,6 +165,7 @@ export class EpisodicNodeRepository {
       sourceDescription: row.sourceDescription,
       content: row.content ?? '',
       validAt: row.validAt,
+      sagaId: (row.sagaId as Uuid | null) ?? null,
     };
   }
 }

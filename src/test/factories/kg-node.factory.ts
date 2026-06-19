@@ -3,11 +3,11 @@ import {
   createCommunity,
   createEntityNode,
   createEpisodicNode,
-  createSagaNode,
+  createSaga,
   EntityNode,
   EpisodeType,
   EpisodicNode,
-  SagaNode,
+  Saga,
 } from '@/knowledge-graph/models';
 import {
   NodeLabelSchema,
@@ -61,9 +61,9 @@ export class KgNodeFactory {
     });
   }
 
-  static createSagaNode(opts: WithStrings<SagaNode> = {}): SagaNode {
+  static createSaga(opts: WithStrings<Saga> = {}): Saga {
     const { name, labels, ...rest } = opts;
-    return createSagaNode({
+    return createSaga({
       name: NodeNameSchema.parse(name ?? 'Test Saga'),
       graphId: KG_TEST_GRAPH_ID,
       labels: labels ? NodeLabelsSchema.parse(labels) : [NodeLabelSchema.parse('Saga')],

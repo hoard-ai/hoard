@@ -57,14 +57,13 @@ model Graph {
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  entityNodes     EntityNode[]
-  entityEdges     EntityEdge[]
-  episodicNodes   EpisodicNode[]
-  episodicEdges   EpisodicEdge[]
-  sagaNodes       SagaNode[]
-  hasEpisodeEdges HasEpisodeEdge[]
-  communities     Community[]
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entityNodes   EntityNode[]
+  entityEdges   EntityEdge[]
+  episodicNodes EpisodicNode[]
+  episodicEdges EpisodicEdge[]
+  sagas         Saga[]
+  communities   Community[]
 
   @@unique([userId, name])
   @@index([userId])
@@ -163,14 +162,16 @@ model EpisodicNode {
   // Trigger-populated tsvector (content=A) - see migration SQL. Never written by app code.
   ftsVector         Unsupported("tsvector")? @map("fts_vector")
   validAt           DateTime                 @map("valid_at") @db.Timestamptz(3)
+  sagaId            String?                  @map("saga_id") @db.Uuid
   createdAt         DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  graph           Graph            @relation(fields: [graphId], references: [id], onDelete: Cascade)
-  mentions        EpisodicEdge[]
-  hasEpisodeEdges HasEpisodeEdge[]
+  graph    Graph          @relation(fields: [graphId], references: [id], onDelete: Cascade)
+  mentions EpisodicEdge[]
+  saga     Saga?          @relation(fields: [sagaId], references: [id], onDelete: SetNull)
 
   @@index([graphId])
   @@index([validAt])
+  @@index([sagaId])
   @@index([ftsVector], type: Gin, map: "episodic_nodes_fts_idx")
   @@map("episodic_nodes")
 }
@@ -192,7 +193,7 @@ model EpisodicEdge {
   @@map("episodic_edges")
 }
 
-model SagaNode {
+model Saga {
   id               String    @id @db.Uuid
   graphId          String    @map("graph_id") @db.Uuid
   name             String
@@ -201,28 +202,12 @@ model SagaNode {
   lastSummarizedAt DateTime? @map("last_summarized_at") @db.Timestamptz(3)
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
 
-  graph           Graph            @relation(fields: [graphId], references: [id], onDelete: Cascade)
-  hasEpisodeEdges HasEpisodeEdge[]
+  graph    Graph          @relation(fields: [graphId], references: [id], onDelete: Cascade)
+  episodes EpisodicNode[]
 
   @@index([graphId])
   @@index([name])
-  @@map("saga_nodes")
-}
-
-model HasEpisodeEdge {
-  id         String   @id @db.Uuid
-  graphId    String   @map("graph_id") @db.Uuid
-  sagaId     String   @map("saga_id") @db.Uuid
-  episodicId String   @map("episodic_id") @db.Uuid
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-
-  graph   Graph        @relation(fields: [graphId], references: [id], onDelete: Cascade)
-  saga    SagaNode     @relation(fields: [sagaId], references: [id], onDelete: Cascade)
-  episode EpisodicNode @relation(fields: [episodicId], references: [id], onDelete: Cascade)
-
-  @@index([graphId])
-  @@index([sagaId])
-  @@map("has_episode_edges")
+  @@map("sagas")
 }
 
 model Community {

@@ -5,11 +5,9 @@ import {
   createEdgeDefaults,
   createEntityEdge,
   createEpisodicEdge,
-  createHasEpisodeEdge,
   EdgeBaseSchema,
   EntityEdgeSchema,
   EpisodicEdgeSchema,
-  HasEpisodeEdgeSchema,
 } from './edge.types';
 
 describe('edge.types', () => {
@@ -260,57 +258,6 @@ describe('EpisodicEdge', () => {
       });
       expect(() =>
         EpisodicEdgeSchema.parse({ ...edge, sourceNodeId: 'not-a-uuid' }),
-      ).toThrow();
-    });
-  });
-});
-
-describe('HasEpisodeEdge', () => {
-  const sourceNodeId = kgId();
-  const targetNodeId = kgId();
-
-  describe('createHasEpisodeEdge', () => {
-    it('should create with correct defaults', () => {
-      const edge = createHasEpisodeEdge({
-        graphId: KG_TEST_GRAPH_ID,
-        sourceNodeId,
-        targetNodeId,
-      });
-      expect(edge.sourceNodeId).toBe(sourceNodeId);
-      expect(edge.targetNodeId).toBe(targetNodeId);
-      expect(edge.id).toBeDefined();
-      expect(edge.createdAt).toBeInstanceOf(Date);
-      expect(edge.graphId).toBe(KG_TEST_GRAPH_ID);
-    });
-  });
-
-  describe('HasEpisodeEdgeSchema', () => {
-    it('should accept valid has-episode edge', () => {
-      const edge = createHasEpisodeEdge({
-        graphId: KG_TEST_GRAPH_ID,
-        sourceNodeId,
-        targetNodeId,
-      });
-      expect(() => HasEpisodeEdgeSchema.parse(edge)).not.toThrow();
-    });
-
-    it('should reject empty graphId', () => {
-      const edge = createHasEpisodeEdge({
-        graphId: KG_TEST_GRAPH_ID,
-        sourceNodeId,
-        targetNodeId,
-      });
-      expect(() => HasEpisodeEdgeSchema.parse({ ...edge, graphId: '' })).toThrow();
-    });
-
-    it('should reject invalid target id', () => {
-      const edge = createHasEpisodeEdge({
-        graphId: KG_TEST_GRAPH_ID,
-        sourceNodeId,
-        targetNodeId,
-      });
-      expect(() =>
-        HasEpisodeEdgeSchema.parse({ ...edge, targetNodeId: 'not-a-uuid' }),
       ).toThrow();
     });
   });

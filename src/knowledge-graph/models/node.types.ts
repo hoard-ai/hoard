@@ -27,6 +27,7 @@ export const EpisodicNodeSchema = NodeBaseSchema.extend({
   sourceDescription: z.string().min(1),
   content: z.string(),
   validAt: z.date(),
+  sagaId: UuidSchema.nullable().default(null),
   // entityEdges omitted: upstream's Neo4j denormalization of "facts this
   // episode contributed to" lives on `entity_edges.episodes` here. For the
   // upstream semantic, query `EntityEdge WHERE thisEpisode = ANY(episodes)`.
@@ -53,12 +54,12 @@ export const CommunitySchema = z.object({
   updatedAt: z.date(),
 });
 
-export const SagaNodeSchema = NodeBaseSchema.extend({
+export const SagaSchema = NodeBaseSchema.extend({
   summary: z.string().default(''),
   lastSummarizedAt: z.date().nullable().default(null),
   // firstEpisodeUuid / lastEpisodeUuid omitted: upstream persists them but
   // never reads either. The queries they'd optimize (start/end of saga) are
-  // cheap via HAS_EPISODE + ORDER BY valid_at.
+  // cheap via episodic_nodes.saga_id + ORDER BY valid_at.
 });
 
 // Types
@@ -67,7 +68,7 @@ export type NodeBase = z.infer<typeof NodeBaseSchema>;
 export type EntityNode = z.infer<typeof EntityNodeSchema>;
 export type EpisodicNode = z.infer<typeof EpisodicNodeSchema>;
 export type Community = z.infer<typeof CommunitySchema>;
-export type SagaNode = z.infer<typeof SagaNodeSchema>;
+export type Saga = z.infer<typeof SagaSchema>;
 
 // Factories
 
@@ -121,10 +122,10 @@ export function createCommunity(
   });
 }
 
-export function createSagaNode(
-  partial: Partial<SagaNode> & { name: NodeName; graphId: Uuid },
-): SagaNode {
-  return SagaNodeSchema.parse({
+export function createSaga(
+  partial: Partial<Saga> & { name: NodeName; graphId: Uuid },
+): Saga {
+  return SagaSchema.parse({
     ...createNodeDefaults(),
     labels: [NodeLabelSchema.parse('Saga')],
     ...partial,
