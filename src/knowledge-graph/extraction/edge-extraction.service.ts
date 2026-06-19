@@ -15,8 +15,8 @@ import {
 
 import { LLM_CONCURRENCY_LIMIT, withConcurrency } from '../batch-utils';
 import { getApplicableEdgeTypes } from '../episode/episode-utils';
-import { EdgeTypeMap, EdgeTypeMappings } from '../episode/types';
-import { createEntityEdge, EntityEdge, EntityNode, EpisodicNode } from '../models';
+import type { EdgeTypeMap, EdgeTypeMappings } from '../episode/types';
+import { createEntityEdge, EntityEdge, EntityNode, type EpisodicNode } from '../models';
 import {
   buildExtractEdgesMessages,
   buildExtractEdgesValidator,
@@ -26,7 +26,7 @@ import {
   EdgeTimestampsSchema,
   ExtractedEdgesSchema,
 } from '../prompts';
-import { EdgeReferenceTimeContext, ExtractEdgesResult } from './types';
+import { type EdgeReferenceTimeContext, ExtractEdgesResult } from './types';
 
 @Injectable()
 export class EdgeExtractionService {

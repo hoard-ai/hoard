@@ -2,13 +2,17 @@ import { Injectable } from '@nestjs/common';
 
 import { Prisma } from '@generated/prisma/client';
 
-import { Uuid } from '@/common/schemas';
-import { Community } from '@/knowledge-graph/models';
+import type { Uuid } from '@/common/schemas';
+import type { Community } from '@/knowledge-graph/models';
 import { FTS_NORM_NONE } from '@/knowledge-graph/search/types';
+import {
+  NodeName,
+  type SearchBySimilarityParams,
+  type SearchByTextParams,
+} from '@/knowledge-graph/types';
 import { Span } from '@/observability';
 import { PrismaService } from '@/providers/database/postgres/prisma.service';
 
-import { NodeName, SearchBySimilarityParams, SearchByTextParams } from '../../types';
 import { fromPgVector, toPgVector } from '../pgvector-utils';
 import { websearchTsquery } from '../sql-filter-builders';
 

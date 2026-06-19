@@ -1,7 +1,7 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { LlmService } from '@/llm/llm.service';
 import {
   LLM_TRACER,
@@ -37,20 +37,20 @@ import {
   AGENTIC_CANDIDATE_LIMIT,
   AgenticSearchResults,
   CommunityReranker,
-  CommunitySearchConfig,
+  type CommunitySearchConfig,
   CommunitySearchMethod,
   DEFAULT_MIN_SCORE,
   EdgeReranker,
-  EdgeSearchConfig,
+  type EdgeSearchConfig,
   EdgeSearchMethod,
   emptyAgenticResults,
   emptySearchResults,
   EpisodeReranker,
-  EpisodeSearchConfig,
+  type EpisodeSearchConfig,
   EpisodeSearchMethod,
   ExpandedQuery,
   NodeReranker,
-  NodeSearchConfig,
+  type NodeSearchConfig,
   NodeSearchMethod,
   PREFETCH_BFS_DEPTH,
   PREFETCH_CANDIDATES,
@@ -59,7 +59,7 @@ import {
   SearchConfigInput,
   SearchFilters,
   SearchOptions,
-  SearchOptionsInput,
+  type SearchOptionsInput,
   SearchOptionsSchema,
   SearchResults,
   SubQueryType,

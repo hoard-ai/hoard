@@ -7,7 +7,7 @@ const config: Config = {
   rootDir: '.',
   testRegex: '.*\\.spec\\.ts$',
   transform: {
-    '^.+\\.ts$': 'ts-jest',
+    '^.+\\.ts$': ['ts-jest', { tsconfig: { module: 'CommonJS', moduleResolution: 'node' } }],
   },
   collectCoverageFrom: ['src/**/*.(t|j)s', '!src/**/*.spec.ts'],
   coverageDirectory: './coverage',

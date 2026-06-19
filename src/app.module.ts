@@ -4,7 +4,7 @@ import { RedisStore } from 'connect-redis';
 import session from 'express-session';
 import { ZodSerializerInterceptor, ZodValidationPipe } from 'nestjs-zod';
 import passport from 'passport';
-import { RedisClientType } from 'redis';
+import type { RedisClientType } from 'redis';
 
 import { AgentModule } from './agent/agent.module';
 import { AuthModule } from './auth/auth.module';

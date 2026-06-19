@@ -30,7 +30,7 @@ import {
   UpdateSelfDto,
   UpdateUserDto,
   UserDto,
-  UserWithoutPassword,
+  type UserWithoutPassword,
   UserWithoutPasswordDto,
 } from './dto';
 import { UserService } from './user.service';

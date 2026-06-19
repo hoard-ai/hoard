@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { CommunityConfigService } from '@/config/community';
 import { metricsOnResult, Span, type SpanMetrics } from '@/observability';
 

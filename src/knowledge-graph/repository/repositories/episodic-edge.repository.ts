@@ -2,8 +2,8 @@ import { Injectable } from '@nestjs/common';
 
 import { Prisma } from '@generated/prisma/client';
 
-import { Uuid } from '@/common/schemas';
-import { EpisodicEdge } from '@/knowledge-graph/models';
+import type { Uuid } from '@/common/schemas';
+import type { EpisodicEdge } from '@/knowledge-graph/models';
 import { Span } from '@/observability';
 import { PrismaService } from '@/providers/database/postgres/prisma.service';
 

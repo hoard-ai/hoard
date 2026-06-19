@@ -2,8 +2,8 @@ import { Injectable } from '@nestjs/common';
 
 import { Prisma, EpisodicNode as PrismaEpisodicNode } from '@generated/prisma/client';
 
-import { Uuid } from '@/common/schemas';
-import { EpisodicNode } from '@/knowledge-graph/models';
+import type { Uuid } from '@/common/schemas';
+import type { EpisodicNode } from '@/knowledge-graph/models';
 import { FTS_NORM_LOG_LENGTH } from '@/knowledge-graph/search/types';
 import { Span } from '@/observability';
 import { PrismaService } from '@/providers/database/postgres/prisma.service';
@@ -12,8 +12,8 @@ import {
   EpisodeType,
   NodeLabels,
   NodeName,
-  RetrieveEpisodesParams,
-  SearchByTextParams,
+  type RetrieveEpisodesParams,
+  type SearchByTextParams,
 } from '../../types';
 import { websearchTsquery } from '../sql-filter-builders';
 

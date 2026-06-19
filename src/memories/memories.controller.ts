@@ -14,7 +14,7 @@ import { ApiNoContentResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { GetUser } from '@/auth/decorator';
 import { LoggedInGuard } from '@/auth/guard';
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 
 import {
   CreateMemoryBlockDto,

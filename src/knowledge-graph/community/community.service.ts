@@ -3,7 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { UndirectedGraph } from 'graphology';
 import louvain from 'graphology-communities-louvain';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { invokeStructured } from '@/llm';
 import { LlmService } from '@/llm/llm.service';
 import {

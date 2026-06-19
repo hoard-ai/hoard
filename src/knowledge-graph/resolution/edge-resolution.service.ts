@@ -1,7 +1,7 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { invokeStructured } from '@/llm';
 import {
   LLM_TRACER,
@@ -30,7 +30,7 @@ import {
   MAX_KEYWORD_CANDIDATES,
   normalizeString,
 } from './resolution-utils';
-import { EdgeChunkSources, EdgeResolutionResult } from './types';
+import { type EdgeChunkSources, EdgeResolutionResult } from './types';
 
 @Injectable()
 export class EdgeResolutionService {

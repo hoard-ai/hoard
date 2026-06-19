@@ -2,9 +2,7 @@
   "compilerOptions": {
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    // TODO(next PR): turn on. Requires `import type` on ~94 decorated-signature
-    // params (TS1272) + one `export type` (TS1205) across the DI codebase.
-    // "isolatedModules": true,
+    "isolatedModules": true,
     "declaration": true,
     "removeComments": true,
     "emitDecoratorMetadata": true,

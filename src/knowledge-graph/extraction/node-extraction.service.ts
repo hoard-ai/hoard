@@ -13,8 +13,8 @@ import {
 } from '@/observability';
 
 import { LLM_CONCURRENCY_LIMIT, withConcurrency } from '../batch-utils';
-import { EntityTypeMap } from '../episode/types';
-import { createEntityNode, EntityEdge, EntityNode, EpisodicNode } from '../models';
+import type { EntityTypeMap } from '../episode/types';
+import { createEntityNode, EntityEdge, EntityNode, type EpisodicNode } from '../models';
 import {
   buildExtractNodesMessages,
   buildExtractNodesValidator,
@@ -29,7 +29,7 @@ import { NodeLabel, NodeLabels, NodeLabelSchema } from '../types';
 import {
   ExtractNodesResult,
   MAX_NODES_PER_SUMMARY_BATCH,
-  NodeEpisodeContext,
+  type NodeEpisodeContext,
 } from './types';
 
 function resolveLabels(

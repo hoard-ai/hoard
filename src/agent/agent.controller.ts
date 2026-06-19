@@ -5,11 +5,11 @@ import { z } from 'zod';
 
 import { GetUser } from '@/auth/decorator';
 import { LoggedInGuard } from '@/auth/guard';
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { CommunityService } from '@/knowledge-graph/community';
 import { EpisodeService } from '@/knowledge-graph/episode';
 import { Traceable } from '@/observability';
-import { UserWithoutPassword } from '@/user/dto';
+import type { UserWithoutPassword } from '@/user/dto';
 
 import { AgentService } from './agent.service';
 

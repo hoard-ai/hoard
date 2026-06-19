@@ -2,12 +2,12 @@ import { Injectable } from '@nestjs/common';
 
 import { Prisma } from '@generated/prisma/client';
 
-import { Uuid } from '@/common/schemas';
-import { EntityNode } from '@/knowledge-graph/models';
+import type { Uuid } from '@/common/schemas';
+import type { EntityNode } from '@/knowledge-graph/models';
 import {
   FTS_NORM_NONE,
   MAX_SEARCH_DEPTH,
-  SearchFilters,
+  type SearchFilters,
 } from '@/knowledge-graph/search/types';
 import { Span } from '@/observability';
 import { PrismaService } from '@/providers/database/postgres/prisma.service';
@@ -15,9 +15,9 @@ import { PrismaService } from '@/providers/database/postgres/prisma.service';
 import {
   NodeLabels,
   NodeName,
-  SearchByBfsParams,
-  SearchBySimilarityParams,
-  SearchByTextParams,
+  type SearchByBfsParams,
+  type SearchBySimilarityParams,
+  type SearchByTextParams,
 } from '../../types';
 import { buildBfsCte } from '../bfs-cte';
 import { fromPgVector, toPgVector } from '../pgvector-utils';

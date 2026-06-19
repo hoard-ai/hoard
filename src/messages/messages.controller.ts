@@ -10,11 +10,11 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Response } from 'express';
+import type { Response } from 'express';
 
 import { GetUser } from '@/auth/decorator';
 import { LoggedInGuard } from '@/auth/guard';
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 
 import { ChatRequestDto, GetMessagesQueryDto } from './dto';
 import { MessagesService } from './messages.service';

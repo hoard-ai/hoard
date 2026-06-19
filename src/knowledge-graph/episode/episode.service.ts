@@ -1,7 +1,7 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { invokeStructured } from '@/llm';
 import { LlmService } from '@/llm/llm.service';
 import {
@@ -43,7 +43,7 @@ import { EdgeResolutionService, NodeResolutionService } from '../resolution';
 import {
   EpisodeType,
   NodeNameSchema,
-  RetrieveEpisodesParamsInput,
+  type RetrieveEpisodesParamsInput,
   RetrieveEpisodesParamsSchema,
 } from '../types';
 import { prepareChunks } from './content-chunking';
@@ -56,12 +56,12 @@ import {
   AddMessageEpisodesOptionsSchema,
   AddTextEpisodesOptionsInput,
   AddTextEpisodesOptionsSchema,
-  BatchState,
+  type BatchState,
   EpisodeWorkItem,
-  NormalizedAddEpisodeOptions,
+  type NormalizedAddEpisodeOptions,
   PERSIST_TRANSACTION_MAX_WAIT_MS,
   PERSIST_TRANSACTION_TIMEOUT_MS,
-  PipelineConfig,
+  type PipelineConfig,
   PREVIOUS_EPISODES_WINDOW,
 } from './types';
 

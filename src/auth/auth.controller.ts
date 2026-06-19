@@ -12,7 +12,7 @@ import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { ZodResponse } from 'nestjs-zod';
 
-import { UserWithoutPassword } from '@/user/dto';
+import type { UserWithoutPassword } from '@/user/dto';
 
 import { AuthService } from './auth.service';
 import { GetUser } from './decorator';

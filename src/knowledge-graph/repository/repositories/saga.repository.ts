@@ -2,8 +2,8 @@ import { Injectable } from '@nestjs/common';
 
 import { Prisma, Saga as PrismaSaga } from '@generated/prisma/client';
 
-import { Uuid } from '@/common/schemas';
-import { Saga } from '@/knowledge-graph/models';
+import type { Uuid } from '@/common/schemas';
+import type { Saga } from '@/knowledge-graph/models';
 import { Span } from '@/observability';
 import { PrismaService } from '@/providers/database/postgres/prisma.service';
 
