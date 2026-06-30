@@ -7,6 +7,8 @@ import type { EpisodicEdge } from '@/knowledge-graph/models';
 import { Span } from '@/observability';
 import { PrismaService } from '@/providers/database/postgres/prisma.service';
 
+import { chunkForBindParams, dedupeById } from '../postgres-utils';
+
 @Injectable()
 export class EpisodicEdgeRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -35,7 +37,26 @@ export class EpisodicEdgeRepository {
   @Span()
   async saveBulk(edges: EpisodicEdge[], tx?: Prisma.TransactionClient): Promise<void> {
     if (edges.length === 0) return;
-    for (const edge of edges) await this.save(edge, tx);
+    const db = tx ?? this.prisma;
+    for (const chunk of chunkForBindParams(dedupeById(edges), 5)) {
+      const rows = chunk.map(
+        (edge) => Prisma.sql`(
+          ${edge.id}::uuid,
+          ${edge.graphId}::uuid,
+          ${edge.sourceNodeId}::uuid,
+          ${edge.targetNodeId}::uuid,
+          ${edge.createdAt}
+        )`,
+      );
+      await db.$executeRaw`
+        INSERT INTO episodic_edges (id, graph_id, episodic_id, entity_id, created_at)
+        VALUES ${Prisma.join(rows)}
+        ON CONFLICT (id) DO UPDATE SET
+          graph_id    = EXCLUDED.graph_id,
+          episodic_id = EXCLUDED.episodic_id,
+          entity_id   = EXCLUDED.entity_id
+      `;
+    }
   }
 
   @Span()

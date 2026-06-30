@@ -20,7 +20,12 @@ import {
   type SearchByTextParams,
 } from '../../types';
 import { buildBfsCte } from '../bfs-cte';
-import { fromPgVector, toPgVector } from '../pgvector-utils';
+import {
+  chunkForBindParams,
+  dedupeById,
+  fromPgVector,
+  toPgVector,
+} from '../postgres-utils';
 import { buildNodeFilterClause, websearchTsquery } from '../sql-filter-builders';
 
 type RawRow = {
@@ -67,11 +72,31 @@ export class EntityNodeRepository {
   @Span()
   async saveBulk(nodes: EntityNode[], tx?: Prisma.TransactionClient): Promise<void> {
     if (nodes.length === 0) return;
-    // Sequential single-row UPSERTs keep parameter binding simple and stay
-    // within Postgres' bind-parameter limit on large batches. The save() above
-    // is itself a single round trip; bulk amortizes only client-side overhead.
-    for (const node of nodes) {
-      await this.save(node, tx);
+    const db = tx ?? this.prisma;
+    for (const chunk of chunkForBindParams(dedupeById(nodes), 8)) {
+      const rows = chunk.map(
+        (node) => Prisma.sql`(
+          ${node.id}::uuid,
+          ${node.graphId}::uuid,
+          ${node.name},
+          ${node.summary},
+          ${JSON.stringify(node.attributes)}::jsonb,
+          ${node.labels}::text[],
+          ${toPgVector(node.nameEmbedding)}::vector,
+          ${node.createdAt}
+        )`,
+      );
+      await db.$executeRaw`
+        INSERT INTO entity_nodes (id, graph_id, name, summary, attributes, labels, name_embedding, created_at)
+        VALUES ${Prisma.join(rows)}
+        ON CONFLICT (id) DO UPDATE SET
+          graph_id       = EXCLUDED.graph_id,
+          name           = EXCLUDED.name,
+          summary        = EXCLUDED.summary,
+          attributes     = EXCLUDED.attributes,
+          labels         = EXCLUDED.labels,
+          name_embedding = EXCLUDED.name_embedding
+      `;
     }
   }
 

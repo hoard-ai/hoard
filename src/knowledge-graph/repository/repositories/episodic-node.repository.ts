@@ -15,6 +15,7 @@ import {
   type RetrieveEpisodesParams,
   type SearchByTextParams,
 } from '../../types';
+import { chunkForBindParams, dedupeById } from '../postgres-utils';
 import { websearchTsquery } from '../sql-filter-builders';
 
 type Row = Pick<
@@ -69,7 +70,38 @@ export class EpisodicNodeRepository {
   @Span()
   async saveBulk(nodes: EpisodicNode[], tx?: Prisma.TransactionClient): Promise<void> {
     if (nodes.length === 0) return;
-    for (const node of nodes) await this.save(node, tx);
+    const db = tx ?? this.prisma;
+    for (const chunk of chunkForBindParams(dedupeById(nodes), 10)) {
+      const rows = chunk.map(
+        (node) => Prisma.sql`(
+          ${node.id}::uuid,
+          ${node.graphId}::uuid,
+          ${node.name},
+          ${node.labels}::text[],
+          ${node.source},
+          ${node.sourceDescription},
+          ${node.content},
+          ${node.validAt},
+          ${node.sagaId}::uuid,
+          ${node.createdAt}
+        )`,
+      );
+      await db.$executeRaw`
+        INSERT INTO episodic_nodes (
+          id, graph_id, name, labels, source, source_description, content, valid_at, saga_id, created_at
+        )
+        VALUES ${Prisma.join(rows)}
+        ON CONFLICT (id) DO UPDATE SET
+          graph_id           = EXCLUDED.graph_id,
+          name               = EXCLUDED.name,
+          labels             = EXCLUDED.labels,
+          source             = EXCLUDED.source,
+          source_description = EXCLUDED.source_description,
+          content            = EXCLUDED.content,
+          valid_at           = EXCLUDED.valid_at,
+          saga_id            = EXCLUDED.saga_id
+      `;
+    }
   }
 
   @Span()

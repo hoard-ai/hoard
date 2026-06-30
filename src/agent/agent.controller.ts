@@ -59,6 +59,7 @@ export class AgentController {
           sourceDescription: 'RememberNow UI',
         },
       ],
+      updateCommunities: true,
     });
 
     return {

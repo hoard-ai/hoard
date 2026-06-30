@@ -19,7 +19,12 @@ import {
   type SearchByTextParams,
 } from '../../types';
 import { buildBfsCte } from '../bfs-cte';
-import { fromPgVector, toPgVector } from '../pgvector-utils';
+import {
+  chunkForBindParams,
+  dedupeById,
+  fromPgVector,
+  toPgVector,
+} from '../postgres-utils';
 import { buildEdgeFilterClause, websearchTsquery } from '../sql-filter-builders';
 
 type RawRow = {
@@ -83,8 +88,44 @@ export class EntityEdgeRepository {
   @Span()
   async saveBulk(edges: EntityEdge[], tx?: Prisma.TransactionClient): Promise<void> {
     if (edges.length === 0) return;
-    for (const edge of edges) {
-      await this.save(edge, tx);
+    const db = tx ?? this.prisma;
+    for (const chunk of chunkForBindParams(dedupeById(edges), 13)) {
+      const rows = chunk.map(
+        (edge) => Prisma.sql`(
+          ${edge.id}::uuid,
+          ${edge.graphId}::uuid,
+          ${edge.sourceNodeId}::uuid,
+          ${edge.targetNodeId}::uuid,
+          ${edge.name},
+          ${edge.fact},
+          ${toPgVector(edge.factEmbedding)}::vector,
+          ${JSON.stringify(edge.attributes)}::jsonb,
+          ${edge.episodes}::uuid[],
+          ${edge.validAt},
+          ${edge.invalidAt},
+          ${edge.expiredAt},
+          ${edge.createdAt}
+        )`,
+      );
+      await db.$executeRaw`
+        INSERT INTO entity_edges (
+          id, graph_id, source_id, target_id, name, fact,
+          fact_embedding, attributes, episodes, valid_at, invalid_at, expired_at, created_at
+        )
+        VALUES ${Prisma.join(rows)}
+        ON CONFLICT (id) DO UPDATE SET
+          graph_id       = EXCLUDED.graph_id,
+          source_id      = EXCLUDED.source_id,
+          target_id      = EXCLUDED.target_id,
+          name           = EXCLUDED.name,
+          fact           = EXCLUDED.fact,
+          fact_embedding = EXCLUDED.fact_embedding,
+          attributes     = EXCLUDED.attributes,
+          episodes       = EXCLUDED.episodes,
+          valid_at       = EXCLUDED.valid_at,
+          invalid_at     = EXCLUDED.invalid_at,
+          expired_at     = EXCLUDED.expired_at
+      `;
     }
   }
 

@@ -13,7 +13,12 @@ import {
 import { Span } from '@/observability';
 import { PrismaService } from '@/providers/database/postgres/prisma.service';
 
-import { fromPgVector, toPgVector } from '../pgvector-utils';
+import {
+  chunkForBindParams,
+  dedupeById,
+  fromPgVector,
+  toPgVector,
+} from '../postgres-utils';
 import { websearchTsquery } from '../sql-filter-builders';
 
 type RawRow = {
@@ -86,8 +91,31 @@ export class CommunityRepository {
   @Span()
   async saveBulk(cs: Community[]): Promise<void> {
     if (cs.length === 0) return;
-    for (const c of cs) {
-      await this.save(c);
+    for (const chunk of chunkForBindParams(dedupeById(cs), 8)) {
+      const rows = chunk.map(
+        (c) => Prisma.sql`(
+          ${c.id}::uuid,
+          ${c.graphId}::uuid,
+          ${c.name},
+          ${c.summary},
+          ${toPgVector(c.nameEmbedding)}::vector,
+          ${c.memberIds}::uuid[],
+          ${c.createdAt},
+          ${c.updatedAt}
+        )`,
+      );
+      await this.prisma.$executeRaw`
+        INSERT INTO communities (
+          id, graph_id, name, summary, name_embedding, member_ids, created_at, updated_at
+        )
+        VALUES ${Prisma.join(rows)}
+        ON CONFLICT (id) DO UPDATE SET
+          name           = EXCLUDED.name,
+          summary        = EXCLUDED.summary,
+          name_embedding = EXCLUDED.name_embedding,
+          member_ids     = EXCLUDED.member_ids,
+          updated_at     = EXCLUDED.updated_at
+      `;
     }
   }
 
