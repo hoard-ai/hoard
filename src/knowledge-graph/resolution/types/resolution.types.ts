@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 import { Uuid, UuidSchema } from '@/common/schemas';
 
-import { EntityEdgeSchema, EntityNodeSchema } from '../../models';
+import { EntityEdge, EntityEdgeSchema, EntityNodeSchema } from '../../models';
 
 // Edge chunk provenance, keyed by edge id and qualified by origin episode, so a
 // cross-episode-merged edge resolves against the chunks it actually came from.
@@ -34,3 +34,15 @@ export const NodeResolutionResultSchema = z.object({
 
 export type EdgeResolutionResult = z.infer<typeof EdgeResolutionResultSchema>;
 export type NodeResolutionResult = z.infer<typeof NodeResolutionResultSchema>;
+
+export type DedupeEdgesResult = {
+  // Existing graph edges that an extracted edge duplicated; episodes appended,
+  // re-saved as-is (not enriched - they keep their prior attributes/bounds).
+  matchedExistingEdges: EntityEdge[];
+  // Freshly extracted edges with no duplicate in the graph (= newEdges). These
+  // need enrichment (timestamps + attributes) and invalidation.
+  survivors: EntityEdge[];
+  // Per survivor: the existing graph edges it contradicts, carried to the
+  // invalidation stage (which runs after timestamps are filled).
+  contradictionsBySurvivorId: Map<Uuid, EntityEdge[]>;
+};

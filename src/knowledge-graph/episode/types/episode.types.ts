@@ -14,6 +14,7 @@ import {
   Saga,
 } from '../../models';
 import type {
+  DedupeEdgesResult,
   EdgeChunkSources,
   EdgeResolutionResult,
   NodeResolutionResult,
@@ -249,7 +250,8 @@ export interface EpisodeWorkItem {
   rawEdges: EntityEdge[];
   chunkIndicesByEdgeId: Map<Uuid, Set<number>>;
   edgesFromThisEpisode: EntityEdge[]; // routed back after cross-batch dedup
-  edgeResolution: EdgeResolutionResult;
+  edgeDedupe: DedupeEdgesResult; // dedup output; survivors enriched, then invalidated
+  edgeResolution: EdgeResolutionResult; // reassembled after enrich + invalidate
 
   // Enrich phase (objects constructed here, persisted in persistPhase)
   episodicEdges: EpisodicEdge[];

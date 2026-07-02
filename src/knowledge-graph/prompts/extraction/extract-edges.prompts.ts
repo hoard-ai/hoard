@@ -1,16 +1,13 @@
 import { BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 
+import { edgeTypeKey } from '@/knowledge-graph/episode/episode-utils';
 import { EdgeTypeMap, EdgeTypeMappings } from '@/knowledge-graph/episode/types';
 import { EntityNode, EpisodicNode } from '@/knowledge-graph/models';
 import { RelationshipTypeSchema } from '@/knowledge-graph/types';
 import type { Violation } from '@/llm';
 
-import {
-  formatCurrentEpisode,
-  formatPreviousEpisodes,
-  formatPromptTimestamp,
-} from '../text-utils';
+import { formatCurrentEpisode, formatPreviousEpisodes } from '../text-utils';
 
 // Schema
 
@@ -37,20 +34,6 @@ const ExtractedEdgeSchema = z.object({
     .describe(
       'A natural language description of the relationship between the entities, paraphrased from the source text',
     ),
-  validAt: z.iso
-    .datetime()
-    .nullable()
-    .optional()
-    .describe(
-      'The date and time when the relationship described by the edge fact became true or was established. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)',
-    ),
-  invalidAt: z.iso
-    .datetime()
-    .nullable()
-    .optional()
-    .describe(
-      'The date and time when the relationship described by the edge fact stopped being true or ended. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ)',
-    ),
   // TODO: Multi-episode extraction per prompt
   // episodeIndices: z
   //   .array(z.number())
@@ -74,15 +57,13 @@ between the given ENTITIES from the CURRENT EPISODE.
 Primary goal:
 Extract every clearly stated or unambiguously implied relationship between two DISTINCT entities
 from the ENTITIES list that can be represented as an edge in a knowledge graph, paraphrased from
-the source text with all specific details preserved, and annotated with relevant date information.
+the source text with all specific details preserved.
 
 Source rules:
 - Only use facts grounded in the CURRENT EPISODE. The CURRENT EPISODE may contain multiple
-episodes, each with its own timestamp.
+episodes.
 - Use PREVIOUS EPISODES only to disambiguate references or support continuity, never as a source
 of new facts.
-- Use each episode's timestamp to resolve temporal references within that episode. REFERENCE TIME
-is a fallback for when no per-episode timestamp is available.
 
 EXTRACTION RULES:
 
@@ -121,7 +102,6 @@ screenplays" to "several screenplays".
    - Do not verbatim quote the original text, but every concrete noun, number, and descriptor in
 the source should survive into the 'fact'.
 6. Facts should include entity names rather than pronouns whenever possible.
-7. NEVER hallucinate or infer temporal bounds from unrelated events.
 
 RELATION TYPE RULES:
 
@@ -129,20 +109,7 @@ RELATION TYPE RULES:
 type signature), use that factTypeName as the 'relationType'.
 - Otherwise, derive a 'relationType' from the relationship predicate in SCREAMING_SNAKE_CASE
 (e.g., WORKS_AT, LIVES_IN, IS_FRIENDS_WITH). Prefer a short, common predicate over a novel or compound one;
-reach for the verb most people would reach for first.
-
-DATETIME RULES:
-
-- Use ISO 8601 with "Z" suffix (UTC) (e.g., 2025-04-30T00:00:00Z).
-- If the fact is ongoing (present tense), set 'validAt' to the timestamp of the episode the fact
-originates from. If no per-episode timestamp is available, use REFERENCE TIME.
-- If a change/termination is expressed, set 'invalidAt' to the relevant timestamp.
-- Leave both fields null if no explicit or resolvable time is stated.
-- If only a date is mentioned (no time), assume 00:00:00.
-- If only a year is mentioned, use January 1st at 00:00:00.
-- Use REFERENCE TIME to resolve vague or relative temporal expressions (e.g., "last week"). When
-the CURRENT EPISODE contains multiple episodes with per-episode timestamps, prefer the timestamp
-of the specific episode the fact originates from.`;
+reach for the verb most people would reach for first.`;
 
 function formatEntitiesBlock(nodes: ReadonlyArray<EntityNode>): string {
   if (nodes.length === 0) return 'None';
@@ -155,7 +122,6 @@ export function buildExtractEdgesMessages(ctx: {
   episode: EpisodicNode;
   nodes: EntityNode[];
   previousEpisodes: EpisodicNode[];
-  referenceTime: Date;
   customInstructions?: string;
   edgeTypes?: EdgeTypeMap;
   edgeTypeMappings?: EdgeTypeMappings;
@@ -164,7 +130,6 @@ export function buildExtractEdgesMessages(ctx: {
     episode,
     nodes,
     previousEpisodes,
-    referenceTime,
     customInstructions,
     edgeTypes,
     edgeTypeMappings,
@@ -172,8 +137,9 @@ export function buildExtractEdgesMessages(ctx: {
 
   const edgeTypeSignaturesMap: Record<string, string[]> = {};
   if (edgeTypeMappings) {
-    for (const [sig, names] of Object.entries(edgeTypeMappings)) {
-      for (const n of names as string[]) {
+    for (const [[src, tgt], names] of edgeTypeMappings) {
+      const sig = edgeTypeKey(src, tgt);
+      for (const n of names) {
         (edgeTypeSignaturesMap[n] ??= []).push(sig);
       }
     }
@@ -199,11 +165,7 @@ ${formatCurrentEpisode(episode)}
 
 <ENTITIES>
 ${formatEntitiesBlock(nodes)}
-</ENTITIES>
-
-<REFERENCE TIME>
-${formatPromptTimestamp(referenceTime)}  # ISO 8601 (UTC); used to resolve relative time mentions
-</REFERENCE TIME>`;
+</ENTITIES>`;
 
   if (edgeTypesContext.length > 0) {
     humanContent += `
@@ -218,20 +180,6 @@ ${JSON.stringify(edgeTypesContext, null, 2)}
   }
 
   return [new SystemMessage(SYSTEM_PROMPT), new HumanMessage(humanContent)];
-}
-
-// Both bounds are schema-validated ISO 8601, so Date.parse is safe here.
-function timestampOrderViolation(
-  validAt: string | null | undefined,
-  invalidAt: string | null | undefined,
-): Violation | null {
-  if (!validAt || !invalidAt) return null;
-  return Date.parse(validAt) > Date.parse(invalidAt)
-    ? {
-        code: 'edge.invalid-temporal-order',
-        message: `invalidAt (${invalidAt}) must not precede validAt (${validAt})`,
-      }
-    : null;
 }
 
 export function buildExtractEdgesValidator(ctx: {
@@ -260,84 +208,7 @@ export function buildExtractEdgesValidator(ctx: {
           message: `self-loop: sourceEntityIdx and targetEntityIdx both refer to id ${e.sourceEntityIdx}`,
         });
       }
-      const order = timestampOrderViolation(e.validAt, e.invalidAt);
-      if (order) violations.push(order);
     }
     return violations;
-  };
-}
-
-// Per-edge timestamp fallback
-//
-// The main edge-extraction prompt above already emits validAt/invalidAt
-// inline on every edge. This second prompt is a single-edge fallback for
-// edges where the batch pass returned both fields as null - we re-ask the
-// model with just one fact and a reference time, which is cheaper and gives
-// the model less to juggle.
-//
-// Mirrors graphiti's `extract_edges.extract_timestamps` (Python
-// `graphiti_core/prompts/extract_edges.py`) called from
-// `edge_operations.py:_extract_edge_timestamps`. Caller:
-// `EpisodeService.extractEdgeTimestampsFallback`.
-
-export const EdgeTimestampsSchema = z.object({
-  validAt: z.iso
-    .datetime()
-    .nullable()
-    .optional()
-    .describe(
-      'When the fact became true. ISO 8601 with Z suffix (e.g., 2025-04-30T00:00:00Z). Null if no temporal information.',
-    ),
-  invalidAt: z.iso
-    .datetime()
-    .nullable()
-    .optional()
-    .describe(
-      'When the fact stopped being true. ISO 8601 with Z suffix (e.g., 2025-04-30T00:00:00Z). Null if ongoing or unknown.',
-    ),
-});
-
-const TIMESTAMPS_FALLBACK_SYSTEM_PROMPT = `You extract temporal bounds from facts. NEVER hallucinate dates.
-
-Given a FACT and its REFERENCE TIME, determine when the fact became true
-(validAt) and when it stopped being true (invalidAt).
-
-Rules:
-- Resolve relative expressions ("last week", "2 years ago", "yesterday") using REFERENCE TIME.
-- If the fact is ongoing (present tense), set validAt to REFERENCE TIME.
-- If a change or end is expressed, set invalidAt to the relevant time.
-- Leave both null if no time is stated or resolvable.
-- If only a date is mentioned (no time), assume 00:00:00.
-- Use ISO 8601 with Z suffix (e.g., 2025-04-30T00:00:00Z).
-- Do NOT hallucinate or infer dates from unrelated events.`;
-
-export function buildExtractTimestampsMessages(ctx: {
-  fact: string;
-  referenceTime: Date;
-}): BaseMessage[] {
-  const { fact, referenceTime } = ctx;
-
-  const humanContent = `Apply every rule from the system instructions when extracting timestamps for the fact below.
-
-<FACT>
-${fact}
-</FACT>
-
-<REFERENCE TIME>
-${formatPromptTimestamp(referenceTime)}
-</REFERENCE TIME>`;
-
-  return [
-    new SystemMessage(TIMESTAMPS_FALLBACK_SYSTEM_PROMPT),
-    new HumanMessage(humanContent),
-  ];
-}
-
-export function buildExtractTimestampsValidator(): (
-  parsed: z.infer<typeof EdgeTimestampsSchema>,
-) => Violation[] {
-  return (parsed) => {
-    const v = timestampOrderViolation(parsed.validAt, parsed.invalidAt);
-    return v ? [v] : [];
   };
 }

@@ -31,5 +31,3 @@ export type ExtractEdgesResult = {
   // each edge id's own origin entry and never unions, see EdgeChunkSources).
   chunkIndicesByEdgeId: Map<Uuid, Set<number>>;
 };
-
-export type EdgeReferenceTimeContext = Map<Uuid, { referenceTime: Date }>;

@@ -1,11 +1,35 @@
 import { KgNodeFactory } from '@/test/factories';
 
 import {
+  assertValidDate,
   concatenateEpisodes,
   formatPreviousEpisodes,
+  formatPromptTimestamp,
   selectChunkText,
   truncateAtSentence,
 } from './text-utils';
+
+describe('assertValidDate', () => {
+  it('passes a valid Date', () => {
+    expect(() => assertValidDate(new Date('2024-01-01T00:00:00Z'), 'ctx')).not.toThrow();
+  });
+
+  it('throws on an invalid Date', () => {
+    expect(() => assertValidDate(new Date('nonsense'), 'ctx')).toThrow();
+  });
+});
+
+describe('formatPromptTimestamp', () => {
+  it('formats a valid Date to second precision', () => {
+    expect(formatPromptTimestamp(new Date('2024-01-01T00:00:00.000Z'))).toBe(
+      '2024-01-01T00:00:00Z',
+    );
+  });
+
+  it('throws on an invalid Date instead of a bare RangeError', () => {
+    expect(() => formatPromptTimestamp(new Date('nonsense'))).toThrow();
+  });
+});
 
 describe('truncateAtSentence', () => {
   it('returns the text unchanged when it is already within maxChars', () => {

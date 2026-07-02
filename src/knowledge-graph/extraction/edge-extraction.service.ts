@@ -18,15 +18,16 @@ import { getApplicableEdgeTypes } from '../episode/episode-utils';
 import type { EdgeTypeMap, EdgeTypeMappings } from '../episode/types';
 import { createEntityEdge, EntityEdge, EntityNode, type EpisodicNode } from '../models';
 import {
+  buildEnrichEdgeMessages,
+  buildEnrichEdgeSchema,
+  buildEnrichEdgeValidator,
   buildExtractEdgesMessages,
   buildExtractEdgesValidator,
-  buildExtractTimestampsMessages,
-  buildExtractTimestampsValidator,
-  buildFillEdgeAttributesMessages,
-  EdgeTimestampsSchema,
   ExtractedEdgesSchema,
 } from '../prompts';
-import { type EdgeReferenceTimeContext, ExtractEdgesResult } from './types';
+import { selectChunkText } from '../prompts/text-utils';
+import type { EdgeChunkSources } from '../resolution/types';
+import { ExtractEdgesResult } from './types';
 
 @Injectable()
 export class EdgeExtractionService {
@@ -38,7 +39,6 @@ export class EdgeExtractionService {
     chunks: string[],
     nodes: EntityNode[],
     previousEpisodes: EpisodicNode[],
-    referenceTime: Date,
     customInstructions?: string,
     edgeTypes?: EdgeTypeMap,
     edgeTypeMappings?: EdgeTypeMappings,
@@ -50,7 +50,6 @@ export class EdgeExtractionService {
       chunks,
       nodes,
       previousEpisodes,
-      referenceTime,
       customInstructions,
       edgeTypes,
       edgeTypeMappings,
@@ -66,7 +65,6 @@ export class EdgeExtractionService {
     chunks: string[],
     nodes: EntityNode[],
     previousEpisodes: EpisodicNode[],
-    referenceTime: Date,
     customInstructions?: string,
     edgeTypes?: EdgeTypeMap,
     edgeTypeMappings?: EdgeTypeMappings,
@@ -85,7 +83,6 @@ export class EdgeExtractionService {
           episode: { ...episode, content: chunk },
           nodes,
           previousEpisodes,
-          referenceTime,
           customInstructions,
           edgeTypes,
           edgeTypeMappings,
@@ -96,6 +93,8 @@ export class EdgeExtractionService {
           tags: ['knowledge-graph', 'extraction.edge'],
           validate: buildExtractEdgesValidator({ nodes }),
         });
+        // Timestamps are NOT extracted here - they are filled later, per edge and
+        // chunk-grounded, by enrichEdges. Edges start with null validAt/invalidAt.
         return result.edges.map((e) =>
           createEntityEdge({
             name: e.relationType,
@@ -104,8 +103,6 @@ export class EdgeExtractionService {
             sourceNodeId: nodes[e.sourceEntityIdx].id,
             targetNodeId: nodes[e.targetEntityIdx].id,
             episodes: [episode.id],
-            validAt: e.validAt ? new Date(e.validAt) : null,
-            invalidAt: e.invalidAt ? new Date(e.invalidAt) : null,
           }),
         );
       }),
@@ -134,148 +131,121 @@ export class EdgeExtractionService {
     };
   }
 
-  async fillEdgeAttributes(
+  /**
+   * Unified edge enrichment. Runs one LLM call per surviving edge to fill its
+   * temporal bounds (validAt/invalidAt) and, when the edge has a custom fact
+   * type, its typed attributes - both grounded in the edge's own chunk text.
+   * Mutates the survivor edges in place. Runs on EVERY survivor (typed and
+   * untyped), so it must precede invalidation, which depends on the bounds.
+   */
+  async enrichEdges(
     model: BaseChatModel,
-    resolvedEdges: EntityEdge[],
+    survivors: EntityEdge[],
     canonicalNodes: EntityNode[],
-    edgeTypes: EdgeTypeMap | undefined,
-    edgeTypeMappings: EdgeTypeMappings | undefined,
-    edgeContext: EdgeReferenceTimeContext,
+    episodes: EpisodicNode[],
+    chunksPerEpisode: string[][],
+    chunkSources: EdgeChunkSources,
+    edgeTypes?: EdgeTypeMap,
+    edgeTypeMappings?: EdgeTypeMappings,
     ctx?: LlmContext,
   ): Promise<void> {
-    await this.fillEdgeAttributesImpl(
+    await this.enrichEdgesImpl(
       model,
-      resolvedEdges,
+      survivors,
       canonicalNodes,
+      episodes,
+      chunksPerEpisode,
+      chunkSources,
       edgeTypes,
       edgeTypeMappings,
-      edgeContext,
       ctx,
     );
   }
 
-  @Span('fillEdgeAttributes', { onResult: metricsOnResult })
-  private async fillEdgeAttributesImpl(
+  @Span('enrichEdges', { onResult: metricsOnResult })
+  private async enrichEdgesImpl(
     model: BaseChatModel,
-    resolvedEdges: EntityEdge[],
+    survivors: EntityEdge[],
     canonicalNodes: EntityNode[],
-    edgeTypes: EdgeTypeMap | undefined,
-    edgeTypeMappings: EdgeTypeMappings | undefined,
-    edgeContext: EdgeReferenceTimeContext,
+    episodes: EpisodicNode[],
+    chunksPerEpisode: string[][],
+    chunkSources: EdgeChunkSources,
+    edgeTypes?: EdgeTypeMap,
+    edgeTypeMappings?: EdgeTypeMappings,
     ctx?: LlmContext,
   ): Promise<{ metrics: SpanMetrics }> {
-    const baseMetrics: SpanMetrics = {
-      'edges.count': resolvedEdges.length,
-      'edgeTypes.count': edgeTypes ? Object.keys(edgeTypes).length : 0,
-    };
-
-    if (!edgeTypes || !edgeTypeMappings) {
-      return { metrics: { ...baseMetrics, 'extracted.count': 0 } };
-    }
     const idToNode = new Map<Uuid, EntityNode>(canonicalNodes.map((n) => [n.id, n]));
-
-    type EdgeAttrTask = {
-      edge: EntityEdge;
-      schema: z.ZodType;
-      referenceTime: Date;
-    };
-    const tasks: EdgeAttrTask[] = [];
-
-    for (const edge of resolvedEdges) {
-      const src = idToNode.get(edge.sourceNodeId);
-      const tgt = idToNode.get(edge.targetNodeId);
-      if (!src || !tgt) {
-        throw new Error(
-          `fillEdgeAttributes: edge ${edge.id} endpoint missing from canonical nodes`,
-        );
-      }
-      const applicable = getApplicableEdgeTypes(
-        src.labels,
-        tgt.labels,
-        edgeTypes,
-        edgeTypeMappings,
-      );
-      // Edges whose relation isn't a custom fact type get no attributes.
-      const typeDef = applicable[edge.name];
-      if (!typeDef) continue;
-
-      const edgeCtx = edgeContext.get(edge.id);
-      if (!edgeCtx) {
-        throw new Error(`fillEdgeAttributes: edge ${edge.id} missing from edgeContext`);
-      }
-      tasks.push({ edge, schema: typeDef.schema, referenceTime: edgeCtx.referenceTime });
-    }
+    let typedCount = 0;
 
     await withConcurrency(
       LLM_CONCURRENCY_LIMIT,
-      tasks.map(({ edge, schema, referenceTime }) => async () => {
-        const attrs = (await invokeStructured(
+      survivors.map((edge) => async () => {
+        const source = chunkSources.get(edge.id);
+        if (!source) {
+          throw new Error(
+            `enrichEdges: edge ${edge.id} has no originating chunk indices`,
+          );
+        }
+        const episode: EpisodicNode = {
+          ...episodes[source.episodeIndex],
+          content: selectChunkText(source.indices, chunksPerEpisode[source.episodeIndex]),
+        };
+        const referenceTime = episodes[source.episodeIndex].validAt;
+
+        // Custom fact-type schema, when the edge's relation maps to one for its
+        // endpoint labels. Untyped edges get temporal-only enrichment.
+        let customSchema: z.ZodType | undefined = undefined;
+        if (edgeTypes && edgeTypeMappings) {
+          const src = idToNode.get(edge.sourceNodeId);
+          const tgt = idToNode.get(edge.targetNodeId);
+          if (!src || !tgt) {
+            throw new Error(
+              `enrichEdges: edge ${edge.id} endpoint missing from canonical nodes`,
+            );
+          }
+          const applicable = getApplicableEdgeTypes(
+            src.labels,
+            tgt.labels,
+            edgeTypes,
+            edgeTypeMappings,
+          );
+          customSchema = applicable[edge.name]?.schema;
+        }
+        const hasCustomAttributes = customSchema !== undefined;
+        if (hasCustomAttributes) typedCount++;
+
+        const result = await invokeStructured(
           model,
-          schema,
-          buildFillEdgeAttributesMessages({
+          buildEnrichEdgeSchema(customSchema),
+          buildEnrichEdgeMessages({
             fact: edge.fact,
+            episode,
             referenceTime,
-            existingAttributes: edge.attributes ?? {},
+            existingAttributes: edge.attributes,
+            hasCustomAttributes,
           }),
           {
             callbacks: this.llmTracer.getCallbacks(ctx),
-            runName: 'fill-edge-attributes',
-            tags: ['knowledge-graph', 'attributes.edge'],
-          },
-        )) as Record<string, unknown>;
-        edge.attributes = { ...edge.attributes, ...attrs };
-      }),
-    );
-    return { metrics: { ...baseMetrics, 'extracted.count': tasks.length } };
-  }
-
-  // Per-edge fallback: when the batch extraction prompt leaves an edge with
-  // both validAt and invalidAt null, ask the LLM specifically for the temporal
-  // window of that single fact. Mirrors graphiti's `_extract_edge_timestamps`
-  // (edge_operations.py:576).
-  async extractEdgeTimestampsFallback(
-    model: BaseChatModel,
-    edges: EntityEdge[],
-    edgeContext: EdgeReferenceTimeContext,
-    ctx?: LlmContext,
-  ): Promise<void> {
-    await this.extractEdgeTimestampsFallbackImpl(model, edges, edgeContext, ctx);
-  }
-
-  @Span('extractEdgeTimestampsFallback', { onResult: metricsOnResult })
-  private async extractEdgeTimestampsFallbackImpl(
-    model: BaseChatModel,
-    edges: EntityEdge[],
-    edgeContext: EdgeReferenceTimeContext,
-    ctx?: LlmContext,
-  ): Promise<{ metrics: SpanMetrics }> {
-    const candidates = edges.filter(
-      (e) => e.validAt === null && e.invalidAt === null && edgeContext.has(e.id),
-    );
-
-    await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
-      candidates.map((edge) => async () => {
-        const referenceTime = edgeContext.get(edge.id)!.referenceTime;
-        const result = await invokeStructured(
-          model,
-          EdgeTimestampsSchema,
-          buildExtractTimestampsMessages({ fact: edge.fact, referenceTime }),
-          {
-            callbacks: this.llmTracer.getCallbacks(ctx),
-            runName: 'extract-edge-timestamps-fallback',
-            tags: ['knowledge-graph', 'timestamps.edge.fallback'],
-            validate: buildExtractTimestampsValidator(),
+            runName: 'enrich-edge',
+            tags: ['knowledge-graph', 'enrich.edge'],
+            validate: buildEnrichEdgeValidator(),
           },
         );
 
+        // ISO string validated at schema level
         if (result.validAt) edge.validAt = new Date(result.validAt);
         if (result.invalidAt) edge.invalidAt = new Date(result.invalidAt);
+        if (result.attributes) {
+          edge.attributes = { ...edge.attributes, ...result.attributes };
+        }
       }),
     );
 
     return {
-      metrics: { 'edges.count': edges.length, 'candidates.count': candidates.length },
+      metrics: {
+        'survivors.count': survivors.length,
+        'typed.count': typedCount,
+      },
     };
   }
 }

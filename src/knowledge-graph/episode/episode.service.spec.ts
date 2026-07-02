@@ -115,13 +115,16 @@ describe('EpisodeService', () => {
     mockNodeResolution.dedupeAcrossBatch.mockReturnValue([]);
     mockEmbeddingService.embedNodes.mockResolvedValue([]);
     mockEdgeExtraction.extractEdges.mockResolvedValue(edgesResult([]));
-    mockEdgeExtraction.fillEdgeAttributes.mockResolvedValue(undefined);
-    mockEdgeExtraction.extractEdgeTimestampsFallback.mockResolvedValue(undefined);
+    mockEdgeExtraction.enrichEdges.mockResolvedValue(undefined);
     mockEmbeddingService.embedEdges.mockResolvedValue([]);
-    mockEdgeResolution.resolveEdges.mockResolvedValue({
-      resolvedEdges: [],
+    mockEdgeResolution.dedupeEdges.mockResolvedValue({
+      matchedExistingEdges: [],
+      survivors: [],
+      contradictionsBySurvivorId: new Map(),
+    });
+    mockEdgeResolution.invalidateEdges.mockReturnValue({
       invalidatedEdges: [],
-      newEdges: [],
+      invalidatedBySurvivorId: new Map(),
     });
     // Default passthrough: dedup returns the flat distinct edge set (no merges).
     // Tests asserting cross-batch dedup behavior override this.
@@ -238,7 +241,6 @@ describe('EpisodeService', () => {
         expect.any(Array),
         expect.arrayContaining([resolved, existing]),
         [],
-        KG_REFERENCE_TIME,
         undefined,
         undefined,
         undefined,
@@ -272,7 +274,7 @@ describe('EpisodeService', () => {
       expect(mockEmbeddingService.embedEdges).toHaveBeenCalledWith([edgeA, edgeB]);
     });
 
-    it('calls resolveEdges with embedded edges and canonicalIdByNodeId', async () => {
+    it('calls dedupeEdges with embedded edges and canonicalIdByNodeId', async () => {
       const edge = KgEdgeFactory.createEntityEdge({
         name: 'WORKS_AT',
         sourceNodeId: u('src'),
@@ -289,7 +291,7 @@ describe('EpisodeService', () => {
         episodes: [makeEpisode('ep1')],
       });
 
-      expect(mockEdgeResolution.resolveEdges).toHaveBeenCalledWith(
+      expect(mockEdgeResolution.dedupeEdges).toHaveBeenCalledWith(
         mockModel,
         expect.any(Array), // episodes
         expect.any(Array), // chunksPerEpisode
@@ -300,6 +302,45 @@ describe('EpisodeService', () => {
         [],
         undefined,
         expect.anything(),
+      );
+    });
+
+    it('pools survivors from dedupe into enrichEdges, then invalidates them', async () => {
+      const edge = KgEdgeFactory.createEntityEdge({
+        name: 'WORKS_AT',
+        sourceNodeId: u('src'),
+        targetNodeId: u('tgt'),
+        fact: 'Alice works at Acme Corp',
+      });
+      const embeddedEdge = { ...edge, factEmbedding: [1, 0, 0] };
+
+      mockEdgeExtraction.extractEdges.mockResolvedValue(edgesResult([edge]));
+      mockEmbeddingService.embedEdges.mockResolvedValue([embeddedEdge]);
+      mockEdgeResolution.dedupeEdges.mockResolvedValue({
+        matchedExistingEdges: [],
+        survivors: [embeddedEdge],
+        contradictionsBySurvivorId: new Map(),
+      });
+
+      await service.addTextEpisodes({
+        userId: KG_TEST_USER_ID,
+        episodes: [makeEpisode('ep1')],
+      });
+
+      expect(mockEdgeExtraction.enrichEdges).toHaveBeenCalledWith(
+        mockModel,
+        [embeddedEdge],
+        expect.any(Array), // canonicalNodes
+        expect.any(Array), // episodes
+        expect.any(Array), // chunksPerEpisode
+        expect.any(Map), // chunkSources
+        undefined,
+        undefined,
+        expect.anything(),
+      );
+      expect(mockEdgeResolution.invalidateEdges).toHaveBeenCalledWith(
+        [embeddedEdge],
+        expect.any(Map),
       );
     });
 

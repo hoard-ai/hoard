@@ -30,7 +30,7 @@ import {
   MAX_KEYWORD_CANDIDATES,
   normalizeString,
 } from './resolution-utils';
-import { type EdgeChunkSources, EdgeResolutionResult } from './types';
+import { type DedupeEdgesResult, type EdgeChunkSources } from './types';
 
 @Injectable()
 export class EdgeResolutionService {
@@ -116,7 +116,16 @@ export class EdgeResolutionService {
     };
   }
 
-  async resolveEdges(
+  /**
+   * Dedup pass (vs the live graph). Runs the `dedupe-edges` LLM comparison for
+   * each extracted edge and partitions the results:
+   * - `matchedExistingEdges`: existing graph edges an extracted edge duplicated,
+   *   with the new episode(s) appended (re-saved as-is, never enriched).
+   * - `survivors`: freshly extracted edges with no duplicate (= newEdges).
+   * - `contradictionsBySurvivorId`: per survivor, the existing edges it
+   *   contradicts
+   */
+  async dedupeEdges(
     model: BaseChatModel,
     episodes: EpisodicNode[],
     chunksPerEpisode: string[][],
@@ -127,8 +136,8 @@ export class EdgeResolutionService {
     previousEpisodes: EpisodicNode[] = [],
     customInstructions?: string,
     ctx?: LlmContext,
-  ): Promise<EdgeResolutionResult> {
-    const { metrics: _m, ...rest } = await this.resolveEdgesImpl(
+  ): Promise<DedupeEdgesResult> {
+    const { metrics: _m, ...rest } = await this.dedupeEdgesImpl(
       model,
       episodes,
       chunksPerEpisode,
@@ -143,8 +152,8 @@ export class EdgeResolutionService {
     return rest;
   }
 
-  @Span('edgeResolution', { onResult: metricsOnResult })
-  private async resolveEdgesImpl(
+  @Span('dedupeEdges', { onResult: metricsOnResult })
+  private async dedupeEdgesImpl(
     model: BaseChatModel,
     episodes: EpisodicNode[],
     chunksPerEpisode: string[][],
@@ -155,18 +164,19 @@ export class EdgeResolutionService {
     previousEpisodes: EpisodicNode[] = [],
     customInstructions?: string,
     ctx?: LlmContext,
-  ): Promise<EdgeResolutionResult & { metrics: SpanMetrics }> {
+  ): Promise<DedupeEdgesResult & { metrics: SpanMetrics }> {
     // Step 1: Remap source/target ids via idMap
     const remapped = extractedEdges.map((e) => ({
       ...e,
       sourceNodeId: idMap.get(e.sourceNodeId) ?? e.sourceNodeId,
       targetNodeId: idMap.get(e.targetNodeId) ?? e.targetNodeId,
     }));
-    // resolveEdges is invoked per origin episode, so every edge here shares one
+    // dedupeEdges is invoked per origin episode, so every edge here shares one
     // graphId. collectCandidates and the per-edge searches below rely on this
     if (new Set(remapped.map((e) => e.graphId)).size > 1) {
-      throw new Error('resolveEdges: edges span multiple graphIds');
+      throw new Error('dedupeEdges: edges span multiple graphIds');
     }
+
     // Candidates use the remapped (canonical) endpoints for getBetweenNodes.
     const existingEdges = remapped.length
       ? await this.collectCandidates(remapped, remapped[0].graphId)
@@ -196,10 +206,10 @@ export class EdgeResolutionService {
       }
     }
 
-    const resolvedEdges: EntityEdge[] = [];
-    const newEdges: EntityEdge[] = [];
+    const matchedExistingEdges: EntityEdge[] = [];
+    const survivors: EntityEdge[] = [];
     const resolvedExistingIds = new Set<Uuid>();
-    const invalidatedEdgesMap = new Map<Uuid, EntityEdge>();
+    const contradictionsBySurvivorId = new Map<Uuid, EntityEdge[]>();
 
     for (const edge of deduped) {
       // Find same-endpoint existing edges (same direction only). Reversed-direction
@@ -245,8 +255,7 @@ export class EdgeResolutionService {
       const similarEdges: EntityEdge[] = [...cosineEdges, ...keywordOnly];
 
       if (endpointEdges.length === 0 && similarEdges.length === 0) {
-        resolvedEdges.push(edge);
-        newEdges.push(edge);
+        survivors.push(edge);
         continue;
       }
 
@@ -263,35 +272,16 @@ export class EdgeResolutionService {
       );
       const isDuplicate = dedupe.duplicateFacts.length > 0;
 
-      if (!isDuplicate) {
-        if (edge.invalidAt && !edge.expiredAt) {
-          edge.expiredAt = new Date();
-        }
-
-        // Self-expiration - if any contradiction candidate postdates this edge,
-        // the edge is superseded by information already in the graph.
-        if (!edge.expiredAt) {
-          const contradictionCandidates = dedupe.contradictedFacts
-            .map((idx) => idxToEdge.get(idx)!)
-            .filter((c) => c.validAt !== null)
-            .sort((a, b) => a.validAt!.getTime() - b.validAt!.getTime());
-          for (const candidate of contradictionCandidates) {
-            if (edge.validAt !== null && candidate.validAt! > edge.validAt) {
-              edge.invalidAt = candidate.validAt;
-              edge.expiredAt = new Date();
-              break;
-            }
-          }
-        }
-
-        resolvedEdges.push(edge);
-        newEdges.push(edge);
-      } else {
+      if (isDuplicate) {
         // Append the resolved edge's originating episode(s) to the matching
-        // existing endpoint edge(s) and include them in resolvedEdges so they are
-        // re-saved with updated episodes. Using edge.episodes (not a single batch
-        // episode) stays correct when the list holds a cross-episode-merged edge.
+        // existing endpoint edge(s) and include them so they are re-saved with
+        // updated episodes. Using edge.episodes (not a single batch episode)
+        // stays correct when the list holds a cross-episode-merged edge.
         // Mirrors Python edge_operations.py:523-524 and 581-582.
+        //
+        // NOTE (accepted behavior): duplicates are NOT adjudicated for
+        // contradictions. A new edge that both duplicates an existing edge AND
+        // contradicts a third edge does not re-invalidate the third edge here
         for (const idx of dedupe.duplicateFacts) {
           const existingEdge = idxToEdge.get(idx)!;
 
@@ -299,22 +289,99 @@ export class EdgeResolutionService {
           for (const ep of edge.episodes) {
             if (!existingEdge.episodes.includes(ep)) existingEdge.episodes.push(ep);
           }
-          resolvedEdges.push(existingEdge);
+          matchedExistingEdges.push(existingEdge);
           resolvedExistingIds.add(existingEdge.id);
+        }
+      } else {
+        survivors.push(edge);
+        contradictionsBySurvivorId.set(
+          edge.id,
+          dedupe.contradictedFacts.map((idx) => idxToEdge.get(idx)!),
+        );
+      }
+    }
+
+    return {
+      matchedExistingEdges,
+      survivors,
+      contradictionsBySurvivorId,
+      metrics: {
+        'episodes.count': episodes.length,
+        'extracted.count': extractedEdges.length,
+        'existing.count': existingEdges.length,
+        'matched.count': matchedExistingEdges.length,
+        'survivors.count': survivors.length,
+      },
+    };
+  }
+
+  /**
+   * Temporal invalidation over the enriched survivors. Pure arithmetic over the
+   * now-filled validAt/invalidAt (no model call). Consumes the contradictions
+   * recorded by `dedupeEdges`. Runs GLOBALLY over the whole batch's survivors so
+   * an existing edge contradicted by survivors in two episodes is invalidated
+   * once (first-survivor-wins); `invalidatedBySurvivorId` lets the orchestrator
+   * attribute each invalidation back to its origin episode.
+   */
+  invalidateEdges(
+    survivors: EntityEdge[],
+    contradictionsBySurvivorId: Map<Uuid, EntityEdge[]>,
+  ): {
+    invalidatedEdges: EntityEdge[];
+    invalidatedBySurvivorId: Map<Uuid, EntityEdge[]>;
+  } {
+    const { metrics: _m, ...rest } = this.invalidateEdgesImpl(
+      survivors,
+      contradictionsBySurvivorId,
+    );
+    return rest;
+  }
+
+  @Span('invalidateEdges', { onResult: metricsOnResult })
+  private invalidateEdgesImpl(
+    survivors: EntityEdge[],
+    contradictionsBySurvivorId: Map<Uuid, EntityEdge[]>,
+  ): {
+    invalidatedEdges: EntityEdge[];
+    invalidatedBySurvivorId: Map<Uuid, EntityEdge[]>;
+    metrics: SpanMetrics;
+  } {
+    const invalidatedEdgesMap = new Map<Uuid, EntityEdge>();
+    const invalidatedBySurvivorId = new Map<Uuid, EntityEdge[]>();
+
+    for (const survivor of survivors) {
+      const contradictions = contradictionsBySurvivorId.get(survivor.id) ?? [];
+
+      // Guard (a): the new edge already carries an end - mark it expired now.
+      if (survivor.invalidAt && !survivor.expiredAt) {
+        survivor.expiredAt = new Date();
+      }
+
+      // Guard (b): self-expiration - if any contradiction candidate postdates
+      // this edge, the edge is superseded by information already in the graph.
+      if (!survivor.expiredAt && survivor.validAt !== null) {
+        const contradictionCandidates = contradictions
+          .filter((c) => c.validAt !== null)
+          .sort((a, b) => a.validAt!.getTime() - b.validAt!.getTime());
+        for (const candidate of contradictionCandidates) {
+          if (candidate.validAt! > survivor.validAt) {
+            survivor.invalidAt = candidate.validAt;
+            survivor.expiredAt = new Date();
+            break;
+          }
         }
       }
 
-      // Only invalidate existing edges that genuinely overlap with the new edge's
-      // validity window and predate it. Mirrors Python resolve_edge_contradictions
-      // (edge_operations.py:425-460).
-      for (const idx of dedupe.contradictedFacts) {
-        const existing = idxToEdge.get(idx)!;
+      // Guard (c): invalidate existing edges that genuinely overlap with the new
+      // edge's validity window and predate it. Mirrors Python
+      // resolve_edge_contradictions (edge_operations.py:425-460).
+      for (const existing of contradictions) {
         if (invalidatedEdgesMap.has(existing.id)) continue;
 
         const edgeInvalidAt = existing.invalidAt;
-        const resolvedValidAt = edge.validAt;
+        const resolvedValidAt = survivor.validAt;
         const edgeValidAt = existing.validAt;
-        const resolvedInvalidAt = edge.invalidAt;
+        const resolvedInvalidAt = survivor.invalidAt;
 
         // Skip if there is no temporal overlap between the two edges.
         if (
@@ -333,28 +400,26 @@ export class EdgeResolutionService {
           resolvedValidAt !== null &&
           edgeValidAt < resolvedValidAt
         ) {
-          invalidatedEdgesMap.set(existing.id, {
+          const invalidated: EntityEdge = {
             ...existing,
-            invalidAt: edge.validAt,
+            invalidAt: survivor.validAt,
             expiredAt: existing.expiredAt ?? new Date(),
-          });
+          };
+          invalidatedEdgesMap.set(existing.id, invalidated);
+          const list = invalidatedBySurvivorId.get(survivor.id) ?? [];
+          list.push(invalidated);
+          invalidatedBySurvivorId.set(survivor.id, list);
         }
       }
     }
-
     const invalidatedEdges = Array.from(invalidatedEdgesMap.values());
 
     return {
-      resolvedEdges,
       invalidatedEdges,
-      newEdges,
+      invalidatedBySurvivorId,
       metrics: {
-        'episodes.count': episodes.length,
-        'extracted.count': extractedEdges.length,
-        'existing.count': existingEdges.length,
-        'resolved.count': resolvedEdges.length,
+        'survivors.count': survivors.length,
         'invalidated.count': invalidatedEdges.length,
-        'new.count': newEdges.length,
       },
     };
   }
@@ -474,7 +539,7 @@ export class EdgeResolutionService {
         // Only endpoint-range indices (same + reversed) count as duplicates.
         // The similar-topic section is for contradictions; accepting duplicates
         // from it would collapse edges with different endpoints. Matches the
-        // guard in `resolveEdges` and upstream `dedupe_edges_bulk` semantics
+        // guard in `dedupeEdges` and upstream `dedupe_edges_bulk` semantics
         // (bulk_utils.py:521-524) which never surfaces non-endpoint duplicates.
         const endpointCount = t.endpointEdges.length;
         const localPairs: [Uuid, Uuid][] = [];
@@ -532,7 +597,7 @@ export class EdgeResolutionService {
     };
   }
 
-  // Shared LLM-driven dedup call used by both per-episode `resolveEdges` and
+  // Shared LLM-driven dedup call used by both per-episode `dedupeEdges` and
   // batch-wide `dedupeAcrossBatch`. Builds the integer-indexed candidate list,
   // invokes the structured-output prompt, and returns the raw decisions plus
   // the idx → edge map so callers can act on duplicateFacts / contradictedFacts.

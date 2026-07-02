@@ -5,19 +5,23 @@ import { EntityNode, EpisodicNode } from '../models';
 import { NodeLabel, NodeLabels, NodeLabelSchema, RelationshipType } from '../types';
 import { EdgeTypeMap, EdgeTypeMappings } from './types';
 
+export function edgeTypeKey(source: NodeLabel, target: NodeLabel): string {
+  return `${source},${target}`;
+}
+
 /**
  * Returns the subset of `edgeTypes` that are valid for the given source/target
- * label combination, as determined by `edgeTypeMap`.
+ * label combination, as determined by `edgeTypeMappings`.
  *
- * `edgeTypeMap` keys are `"SourceLabel,TargetLabel"` strings. For each
- * combination of source and target labels, the map yields edge type names whose
- * definitions are then looked up in `edgeTypes`. Duplicates are deduplicated
- * (first occurrence wins).
+ * `edgeTypeMappings` is keyed by `[SourceLabel, TargetLabel]` tuples, matched
+ * here via `edgeTypeKey`. For each combination of source and target labels, the
+ * map yields edge type names whose definitions are then looked up in
+ * `edgeTypes`. Duplicates are deduplicated (first occurrence wins).
  *
  * @example
  * // sourceLabels: ['Person'], targetLabels: ['Company']
- * // edgeTypeMap:  { 'Person,Company': ['WORKS_AT', 'FOUNDED'] }
- * // edgeTypes:    { WORKS_AT: { description: '...', schema: ... }, FOUNDED: { ... } }
+ * // edgeTypeMappings: Map { ['Person','Company'] => ['WORKS_AT', 'FOUNDED'] }
+ * // edgeTypes:        { WORKS_AT: { description: '...', schema: ... }, FOUNDED: { ... } }
  * // → { WORKS_AT: { description: '...', schema: ... }, FOUNDED: { ... } }
  */
 export function getApplicableEdgeTypes(
@@ -28,11 +32,14 @@ export function getApplicableEdgeTypes(
 ): EdgeTypeMap {
   const result: EdgeTypeMap = {};
 
+  const namesByKey = new Map<string, RelationshipType[]>();
+  for (const [[src, tgt], typeNames] of edgeTypeMappings) {
+    namesByKey.set(edgeTypeKey(src, tgt), typeNames);
+  }
+
   for (const src of sourceLabels) {
     for (const tgt of targetLabels) {
-      const key: [NodeLabel, NodeLabel] = [src, tgt];
-
-      for (const typeName of edgeTypeMappings.get(key) ?? []) {
+      for (const typeName of namesByKey.get(edgeTypeKey(src, tgt)) ?? []) {
         const typeDef = edgeTypes[typeName];
         if (typeDef && !(typeName in result)) result[typeName] = typeDef;
       }

@@ -2,11 +2,19 @@ import type { EpisodicNode } from '../models';
 
 export const MAX_SUMMARY_CHARS = 1000;
 
-// Node's Date.toISOString() emits millisecond precision ("2025-04-30T00:00:00.000Z"),
-// but every prompt rule example uses the second-precision form ("2025-04-30T00:00:00Z").
-// Strip milliseconds so the timestamps the model sees on input match the format it is
-// instructed to emit on output.
+/** Throws with a descriptive context message if `date` is invalid (NaN time). */
+export function assertValidDate(date: Date, context: string): void {
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`${context}: expected a valid Date, received an invalid one`);
+  }
+}
+
+/**
+ * Formats a Date as second-precision ISO 8601 (drops milliseconds) to match the
+ * timestamp format the model is instructed to emit. Throws on an invalid Date.
+ */
 export function formatPromptTimestamp(date: Date): string {
+  assertValidDate(date, 'formatPromptTimestamp');
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 

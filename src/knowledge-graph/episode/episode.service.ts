@@ -28,6 +28,7 @@ import {
   createEpisodicEdge,
   createEpisodicNode,
   createSaga,
+  EntityEdge,
   EntityNode,
   EpisodicNode,
 } from '../models';
@@ -466,6 +467,11 @@ export class EpisodeService {
         rawEdges: [],
         chunkIndicesByEdgeId: new Map(),
         edgesFromThisEpisode: [],
+        edgeDedupe: {
+          matchedExistingEdges: [],
+          survivors: [],
+          contradictionsBySurvivorId: new Map(),
+        },
         edgeResolution: { resolvedEdges: [], invalidatedEdges: [], newEdges: [] },
         episodicEdges: [],
       };
@@ -654,7 +660,6 @@ export class EpisodeService {
             it.chunks,
             it.canonicalNodes,
             it.prevEpisodes,
-            it.node.validAt,
             cfg.customInstructions,
             cfg.edgeTypes,
             cfg.effectiveEdgeTypeMappings,
@@ -703,22 +708,24 @@ export class EpisodeService {
       ctx,
     );
 
-    // Route each canonical edge to its ORIGIN episode so it is resolved exactly
-    // once, against the episode whose validAt / previousEpisodes / chunks made it.
+    // Route each canonical edge to its ORIGIN episode so it is deduped exactly
+    // once, against the episode whose previousEpisodes / chunks made it.
     for (const edge of canonicalEdges) {
       const source = batch.chunkSources.get(edge.id);
       if (!source) {
-        throw new Error(`resolveEdges partition: edge ${edge.id} has no chunk source`);
+        throw new Error(`edge dedup partition: edge ${edge.id} has no chunk source`);
       }
       items[source.episodeIndex].edgesFromThisEpisode.push(edge);
     }
 
-    // Resolve edges per origin episode (candidates collected inside resolveEdges).
-    const edgeResolutions = await withConcurrency(
+    // DEDUPE per origin episode (candidates collected inside dedupeEdges). No
+    // timestamps are touched here - contradictions are recorded and resolved
+    // after enrichment fills validAt/invalidAt.
+    const dedupes = await withConcurrency(
       LLM_CONCURRENCY_LIMIT,
       items.map(
         (it) => () =>
-          this.edgeResolutionService.resolveEdges(
+          this.edgeResolutionService.dedupeEdges(
             model,
             items.map((other) => other.node),
             items.map((other) => other.chunks),
@@ -733,35 +740,58 @@ export class EpisodeService {
       ),
     );
     items.forEach((it, i) => {
-      it.edgeResolution = edgeResolutions[i];
+      it.edgeDedupe = dedupes[i];
     });
 
-    // Fill attributes + per-edge timestamp fallback over the freshly extracted
-    // (new) edges only, so re-matched existing edges aren't re-LLM'd or
-    // overwritten with thinner values from a new episode.
-    const allNewEdges = items.flatMap((it) => it.edgeResolution.newEdges);
-    const edgeContext = new Map<Uuid, { referenceTime: Date }>();
-    items.forEach((it) => {
-      for (const edge of it.edgeResolution.resolvedEdges) {
-        edgeContext.set(edge.id, { referenceTime: it.node.validAt });
-      }
-    });
-
-    await this.edgeExtractionService.fillEdgeAttributes(
+    // FILL - one chunk-grounded enrichment call per surviving edge (timestamps +
+    // custom attributes), over the pooled survivors. Mutates edges in place.
+    const allSurvivors = items.flatMap((it) => it.edgeDedupe.survivors);
+    await this.edgeExtractionService.enrichEdges(
       model,
-      allNewEdges,
+      allSurvivors,
       batch.canonicalNodes,
+      items.map((it) => it.node),
+      items.map((it) => it.chunks),
+      batch.chunkSources,
       cfg.edgeTypes,
       cfg.effectiveEdgeTypeMappings,
-      edgeContext,
       ctx,
     );
-    await this.edgeExtractionService.extractEdgeTimestampsFallback(
-      model,
-      allNewEdges,
-      edgeContext,
-      ctx,
+
+    // INVALIDATE - temporal adjudication over the now-filled survivors, global so
+    // an existing edge contradicted from two episodes is invalidated once.
+    //
+    // TODO: only new-vs-existing-graph contradictions are adjudicated. Two
+    // brand-new edges from different episodes in this batch that contradict each
+    // other are never compared (dedupeAcrossBatch collapses duplicates but
+    // ignores contradictions), so both persist. Examine with cross-graph
+    // ingestion in mind - a batch may span multiple graphs, so any new-vs-new
+    // pass must scope contradictions by graphId (never across graphs).
+    const mergedContradictions = new Map<Uuid, EntityEdge[]>();
+    for (const it of items) {
+      for (const [id, edges] of it.edgeDedupe.contradictionsBySurvivorId) {
+        mergedContradictions.set(id, edges);
+      }
+    }
+    const { invalidatedBySurvivorId } = this.edgeResolutionService.invalidateEdges(
+      allSurvivors,
+      mergedContradictions,
     );
+
+    // Reassemble the per-item EdgeResolutionResult. Each survivor belongs to one
+    // origin episode (chunkSources), so invalidations attribute to that entry.
+    items.forEach((it) => {
+      it.edgeResolution = {
+        newEdges: it.edgeDedupe.survivors,
+        resolvedEdges: [
+          ...it.edgeDedupe.matchedExistingEdges,
+          ...it.edgeDedupe.survivors,
+        ],
+        invalidatedEdges: it.edgeDedupe.survivors.flatMap(
+          (s) => invalidatedBySurvivorId.get(s.id) ?? [],
+        ),
+      };
+    });
 
     return {
       metrics: {
@@ -774,7 +804,7 @@ export class EpisodeService {
           (s, it) => s + it.edgeResolution.invalidatedEdges.length,
           0,
         ),
-        'edge.count.new': allNewEdges.length,
+        'edge.count.new': allSurvivors.length,
       },
     };
   }
