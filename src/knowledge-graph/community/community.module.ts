@@ -2,6 +2,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 
 import { CommunityConfigModule } from '@/config/community';
+import { KnowledgeGraphConfigModule } from '@/config/knowledge-graph';
 import { LlmModule } from '@/llm/llm.module';
 
 import { EmbeddingModule } from '../embedding/embedding.module';
@@ -24,6 +25,7 @@ import {
       { name: COMMUNITY_REBUILD_QUEUE },
     ),
     CommunityConfigModule,
+    KnowledgeGraphConfigModule,
     RepositoryModule,
     LlmModule,
     EmbeddingModule,

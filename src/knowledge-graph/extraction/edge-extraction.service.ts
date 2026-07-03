@@ -13,7 +13,6 @@ import {
   type SpanMetrics,
 } from '@/observability';
 
-import { LLM_CONCURRENCY_LIMIT, withConcurrency } from '../batch-utils';
 import { getApplicableEdgeTypes } from '../episode/episode-utils';
 import type { EdgeTypeMap, EdgeTypeMappings } from '../episode/types';
 import { createEntityEdge, EntityEdge, EntityNode, type EpisodicNode } from '../models';
@@ -76,9 +75,8 @@ export class EdgeExtractionService {
   }> {
     // Each chunk gets the SAME full canonical node list, so the entity index
     // space is shared across chunks (nodes[idx] resolves identically everywhere).
-    const perChunk = await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
-      chunks.map((chunk) => async () => {
+    const perChunk = await Promise.all(
+      chunks.map(async (chunk) => {
         const messages = buildExtractEdgesMessages({
           episode: { ...episode, content: chunk },
           nodes,
@@ -177,9 +175,8 @@ export class EdgeExtractionService {
     const idToNode = new Map<Uuid, EntityNode>(canonicalNodes.map((n) => [n.id, n]));
     let typedCount = 0;
 
-    await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
-      survivors.map((edge) => async () => {
+    await Promise.all(
+      survivors.map(async (edge) => {
         const source = chunkSources.get(edge.id);
         if (!source) {
           throw new Error(

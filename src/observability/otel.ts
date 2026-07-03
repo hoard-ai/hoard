@@ -13,7 +13,7 @@ import { PrismaInstrumentation } from '@prisma/instrumentation';
 import { parseLangfuseConfig } from '@/config/langfuse';
 import { parseOtelConfig } from '@/config/otel';
 
-import { setLangfuseEnabled } from './langfuse-state';
+import { setLangfuseEnabled } from './observability-utils';
 
 const HOARD_SCOPE = 'hoard';
 const PRISMA_SCOPE = 'prisma';

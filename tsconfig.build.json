@@ -8,6 +8,7 @@
     "jest.config.ts",
     "prisma.config.ts",
     "generated",
-    "qmd"
+    "qmd",
+    "bottleneck"
   ]
 }

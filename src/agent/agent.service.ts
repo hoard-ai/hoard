@@ -90,7 +90,9 @@ export class AgentService {
   }): Promise<AgentReply> {
     const { userId, graphIds, message } = params;
 
-    const model = await this.llmService.getActiveModel(userId);
+    // Bypass the concurrency limiter so a live conversation
+    // never queues behind background ingestion / bulk work.
+    const model = await this.llmService.getActiveModel(userId, { rateLimited: false });
     const ctx: LlmContext = {
       userId,
       tags: ['agent', ...graphIds.map((id) => `group:${id}`)],

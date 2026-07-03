@@ -9,11 +9,13 @@ import { LlmProvider } from '@generated/prisma/client';
 import { LlmConfigService } from '@/config/llm';
 import { CryptoService } from '@/providers/crypto';
 import { PrismaService } from '@/providers/database/postgres';
+import { RateLimiterService } from '@/providers/rate-limit';
 import { TEST_USER_UUID, TestLlmFactory, UserFactory } from '@/test/factories';
 
 import { UserLlmProviderSchema } from './dto';
 import { LlmFactoryService } from './factory/llm-factory.service';
 import { LlmService } from './llm.service';
+import { DEFAULT_MODEL_CONCURRENCY } from './types';
 
 describe('LlmService', () => {
   let llmService: LlmService;
@@ -21,6 +23,7 @@ describe('LlmService', () => {
   let factoryService: DeepMocked<LlmFactoryService>;
   let llmConfigService: DeepMocked<LlmConfigService>;
   let cryptoService: DeepMocked<CryptoService>;
+  let rateLimiterService: DeepMocked<RateLimiterService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -36,6 +39,10 @@ describe('LlmService', () => {
           useValue: createMock<LlmConfigService>(),
         },
         { provide: CryptoService, useValue: createMock<CryptoService>() },
+        {
+          provide: RateLimiterService,
+          useValue: createMock<RateLimiterService>(),
+        },
       ],
     }).compile();
 
@@ -44,6 +51,7 @@ describe('LlmService', () => {
     factoryService = module.get(LlmFactoryService);
     llmConfigService = module.get(LlmConfigService);
     cryptoService = module.get(CryptoService);
+    rateLimiterService = module.get(RateLimiterService);
   });
 
   afterEach(() => {
@@ -496,29 +504,27 @@ describe('LlmService', () => {
 
     it('should use providerOverride directly without querying the user table', async () => {
       const mockConfig = TestLlmFactory.createPrismaLlmConfig();
-      const mockModel = {} as unknown as BaseChatModel;
+      const mockModel = { _generate: jest.fn() } as unknown as BaseChatModel;
 
       prismaService.llmConfig.findUnique.mockResolvedValueOnce(mockConfig);
       cryptoService.decrypt.mockReturnValueOnce('decrypted-key');
       factoryService.createModel.mockReturnValueOnce(mockModel);
 
-      const result = await llmService.getActiveModel(
-        TEST_USER_UUID,
-        LlmProvider.ANTHROPIC,
-      );
+      const result = await llmService.getActiveModel(TEST_USER_UUID, {
+        providerOverride: LlmProvider.ANTHROPIC,
+      });
 
       expect(prismaService.user.findUniqueOrThrow).not.toHaveBeenCalled();
       expect(result).toBe(mockModel);
     });
 
     it('should return createPlatformModel() result for PLATFORM provider', async () => {
-      const mockModel = {} as unknown as BaseChatModel;
+      const mockModel = { _generate: jest.fn() } as unknown as BaseChatModel;
       factoryService.createPlatformModel.mockReturnValueOnce(mockModel);
 
-      const result = await llmService.getActiveModel(
-        TEST_USER_UUID,
-        LlmProvider.PLATFORM,
-      );
+      const result = await llmService.getActiveModel(TEST_USER_UUID, {
+        providerOverride: LlmProvider.PLATFORM,
+      });
 
       expect(factoryService.createPlatformModel).toHaveBeenCalled();
       expect(result).toBe(mockModel);
@@ -528,7 +534,9 @@ describe('LlmService', () => {
       prismaService.llmConfig.findUnique.mockResolvedValueOnce(null);
 
       await expect(
-        llmService.getActiveModel(TEST_USER_UUID, LlmProvider.ANTHROPIC),
+        llmService.getActiveModel(TEST_USER_UUID, {
+          providerOverride: LlmProvider.ANTHROPIC,
+        }),
       ).rejects.toThrow(
         new NotFoundException(
           `No configuration found for provider ${LlmProvider.ANTHROPIC}`,
@@ -541,7 +549,9 @@ describe('LlmService', () => {
       prismaService.llmConfig.findUnique.mockResolvedValueOnce(configWithoutApiKey);
 
       await expect(
-        llmService.getActiveModel(TEST_USER_UUID, LlmProvider.ANTHROPIC),
+        llmService.getActiveModel(TEST_USER_UUID, {
+          providerOverride: LlmProvider.ANTHROPIC,
+        }),
       ).rejects.toThrow(
         new BadRequestException(
           `Provider ${LlmProvider.ANTHROPIC} is missing an API key`,
@@ -553,12 +563,14 @@ describe('LlmService', () => {
       const mockConfig = TestLlmFactory.createPrismaLlmConfig({
         encryptedApiKey: 'CIPHERTEXT',
       });
-      const mockModel = {} as unknown as BaseChatModel;
+      const mockModel = { _generate: jest.fn() } as unknown as BaseChatModel;
       prismaService.llmConfig.findUnique.mockResolvedValueOnce(mockConfig);
       cryptoService.decrypt.mockReturnValueOnce('plain-decrypted-key');
       factoryService.createModel.mockReturnValueOnce(mockModel);
 
-      await llmService.getActiveModel(TEST_USER_UUID, LlmProvider.ANTHROPIC);
+      await llmService.getActiveModel(TEST_USER_UUID, {
+        providerOverride: LlmProvider.ANTHROPIC,
+      });
 
       expect(cryptoService.decrypt).toHaveBeenCalledWith('CIPHERTEXT');
       expect(factoryService.createModel).toHaveBeenCalledWith(
@@ -568,7 +580,7 @@ describe('LlmService', () => {
 
     it('should read activeLlmProvider from user record when no override given', async () => {
       const mockConfig = TestLlmFactory.createPrismaLlmConfig();
-      const mockModel = {} as unknown as BaseChatModel;
+      const mockModel = { _generate: jest.fn() } as unknown as BaseChatModel;
 
       prismaService.user.findUniqueOrThrow.mockResolvedValueOnce({
         ...UserFactory.createPrismaUser(),
@@ -585,6 +597,65 @@ describe('LlmService', () => {
         select: { activeLlmProvider: true },
       });
       expect(result).toBe(mockModel);
+    });
+
+    it('wraps _generate through the limiter with the derived key + limit by default', async () => {
+      const mockConfig = TestLlmFactory.createPrismaLlmConfig();
+      const origGenerate = jest.fn();
+      const rawModel = { _generate: origGenerate } as unknown as BaseChatModel;
+      prismaService.llmConfig.findUnique.mockResolvedValueOnce(mockConfig);
+      cryptoService.decrypt.mockReturnValueOnce('decrypted-key');
+      factoryService.createModel.mockReturnValueOnce(rawModel);
+
+      const result = await llmService.getActiveModel(TEST_USER_UUID, {
+        providerOverride: LlmProvider.ANTHROPIC,
+      });
+
+      // _generate is shadowed, and invoking it routes through the limiter pool.
+      const generate = (result as unknown as { _generate: (...a: unknown[]) => unknown })
+        ._generate;
+      expect(generate).not.toBe(origGenerate);
+      await generate([], {}, undefined);
+      expect(rateLimiterService.schedule).toHaveBeenCalledWith(
+        `user:${TEST_USER_UUID}:${LlmProvider.ANTHROPIC}`,
+        DEFAULT_MODEL_CONCURRENCY,
+        undefined,
+        expect.any(Function),
+      );
+    });
+
+    it('returns the unwrapped model when rateLimited is false', async () => {
+      const mockConfig = TestLlmFactory.createPrismaLlmConfig();
+      const origGenerate = jest.fn();
+      const rawModel = { _generate: origGenerate } as unknown as BaseChatModel;
+      prismaService.llmConfig.findUnique.mockResolvedValueOnce(mockConfig);
+      cryptoService.decrypt.mockReturnValueOnce('decrypted-key');
+      factoryService.createModel.mockReturnValueOnce(rawModel);
+
+      const result = await llmService.getActiveModel(TEST_USER_UUID, {
+        providerOverride: LlmProvider.ANTHROPIC,
+        rateLimited: false,
+      });
+
+      expect(result).toBe(rawModel);
+      // _generate is untouched (not wrapped).
+      expect((result as unknown as { _generate: unknown })._generate).toBe(origGenerate);
+    });
+
+    it('always rate-limits PLATFORM even when rateLimited is false', async () => {
+      const origGenerate = jest.fn();
+      const rawModel = { _generate: origGenerate } as unknown as BaseChatModel;
+      factoryService.createPlatformModel.mockReturnValueOnce(rawModel);
+
+      const result = await llmService.getActiveModel(TEST_USER_UUID, {
+        providerOverride: LlmProvider.PLATFORM,
+        rateLimited: false,
+      });
+
+      // Wrapped despite rateLimited:false - _generate was shadowed.
+      expect((result as unknown as { _generate: unknown })._generate).not.toBe(
+        origGenerate,
+      );
     });
   });
 });

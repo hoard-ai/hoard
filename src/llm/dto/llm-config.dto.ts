@@ -18,20 +18,27 @@ export const LlmProviderSchema = z.enum(PrismaLlmProvider).meta({ id: 'LlmProvid
 
 const modelSchema = z.string().min(1);
 
+// Per-model cap on concurrent in-flight LLM generations - the rate-limit pool
+// size for this credential. Unset falls back to DEFAULT_MODEL_CONCURRENCY.
+const concurrencySchema = z.int().positive().optional();
+
+const BaseModelSchema = z.object({
+  model: modelSchema,
+  concurrency: concurrencySchema,
+});
+
 // https://reference.langchain.com/javascript/langchain-anthropic/AnthropicInput
-const BaseAnthropicSchema = z.object({
+const BaseAnthropicSchema = BaseModelSchema.extend({
   provider: z.literal(LlmProvider.ANTHROPIC),
   // https://docs.anthropic.com/claude/docs/models-overview
-  model: modelSchema,
   temperature: z.number().min(0).max(1).optional(),
   topK: z.number().int().positive().optional(),
 });
 
 // https://reference.langchain.com/javascript/langchain-google-genai/GoogleGenerativeAIChatInput
-const BaseGoogleGeminiSchema = z.object({
+const BaseGoogleGeminiSchema = BaseModelSchema.extend({
   provider: z.literal(LlmProvider.GOOGLE_GEMINI),
   // https://ai.google.dev/gemini-api/docs/models
-  model: modelSchema,
   temperature: z.number().min(0).max(2).optional(),
   topK: z.number().int().positive().optional(),
 });

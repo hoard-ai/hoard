@@ -33,5 +33,12 @@
       "@test/*": ["./test/*"]
     }
   },
-  "exclude": ["node_modules", "dist", "prisma.config.ts", "generated", "qmd"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "prisma.config.ts",
+    "generated",
+    "qmd",
+    "bottleneck"
+  ]
 }

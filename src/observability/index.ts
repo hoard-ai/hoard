@@ -1,5 +1,5 @@
 export * from './decorators';
-export * from './langfuse-state';
+export * from './observability-utils';
 export * from './observability.module';
 export * from './pino';
 export * from './pino-logger.service';

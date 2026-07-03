@@ -2,6 +2,7 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 
 import type { Uuid } from '@/common/schemas';
+import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { invokeStructured } from '@/llm';
 import {
   LLM_TRACER,
@@ -12,7 +13,7 @@ import {
   type SpanMetrics,
 } from '@/observability';
 
-import { compressIdMap, LLM_CONCURRENCY_LIMIT, withConcurrency } from '../batch-utils';
+import { compressIdMap, withConcurrency } from '../batch-utils';
 import { EntityEdge, EpisodicNode } from '../models';
 import {
   buildDedupeEdgesMessages,
@@ -37,6 +38,7 @@ export class EdgeResolutionService {
   constructor(
     private readonly edgeRepo: EntityEdgeRepository,
     @Inject(LLM_TRACER) private readonly llmTracer: LlmTracer,
+    private readonly kgConfig: KnowledgeGraphConfigService,
   ) {}
 
   /* Builds a synthetic episode whose content is scoped to the chunks the edge
@@ -522,7 +524,7 @@ export class EdgeResolutionService {
     }
 
     const pairResults = await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
+      this.kgConfig.memoryBackpressureConcurrencyLimit,
       tasks.map((t) => async (): Promise<[Uuid, Uuid][]> => {
         const ownerIdx = edgeOwner.get(t.edge.id)!;
         const { dedupe, idxToEdge } = await this.dedupeEdgeViaLlm(

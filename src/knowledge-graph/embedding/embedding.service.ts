@@ -7,7 +7,13 @@ import { GoogleGenAI } from '@google/genai';
 import { Injectable } from '@nestjs/common';
 
 import { EmbeddingConfigService } from '@/config/embedding';
-import { metricsOnResult, Span, type SpanMetrics } from '@/observability';
+import {
+  metricsOnResult,
+  setActiveSpanAttribute,
+  Span,
+  type SpanMetrics,
+} from '@/observability';
+import { RateLimiterService } from '@/providers/rate-limit';
 
 import { EntityEdge, EntityNode } from '../models';
 
@@ -16,10 +22,15 @@ export class EmbeddingService {
   private readonly client: GoogleGenAI | null;
   private readonly modelName: string;
   private readonly _dimensions: number;
+  private readonly concurrencyLimit: number;
 
-  constructor(embeddingConfig: EmbeddingConfigService) {
+  constructor(
+    embeddingConfig: EmbeddingConfigService,
+    private readonly rateLimiter: RateLimiterService,
+  ) {
     this._dimensions = embeddingConfig.dimensions;
     this.modelName = embeddingConfig.googleModel;
+    this.concurrencyLimit = embeddingConfig.concurrencyLimit;
 
     if (!embeddingConfig.embeddingEnabled) {
       this.client = null;
@@ -39,26 +50,36 @@ export class EmbeddingService {
     return this._dimensions;
   }
 
+  // TODO: examine the provider's per-request contents cap. A single call with a
+  // very large `texts` array may exceed it
   private async embed(texts: string[]): Promise<number[][]> {
-    const res = await this.client!.models.embedContent({
-      model: this.modelName,
-      // Wrap each text as its own Content so the SDK returns N embeddings,
-      // not a single embedding for N concatenated parts.
-      contents: texts.map((text) => ({ parts: [{ text }] })),
-      config: { outputDimensionality: this._dimensions },
-    });
-    const embeddings = res.embeddings;
-    if (!embeddings || embeddings.length !== texts.length) {
-      throw new Error(
-        `Embedding API returned ${embeddings?.length ?? 0} vectors for ${texts.length} inputs`,
-      );
-    }
-    return embeddings.map((e, i) => {
-      if (!e.values) {
-        throw new Error(`Embedding API returned no values for input index ${i}`);
-      }
-      return e.values;
-    });
+    return this.rateLimiter.schedule(
+      'embedding',
+      this.concurrencyLimit,
+      undefined,
+      async () => {
+        const res = await this.client!.models.embedContent({
+          model: this.modelName,
+          // Wrap each text as its own Content so the SDK returns N embeddings,
+          // not a single embedding for N concatenated parts.
+          contents: texts.map((text) => ({ parts: [{ text }] })),
+          config: { outputDimensionality: this._dimensions },
+        });
+        const embeddings = res.embeddings;
+        if (!embeddings || embeddings.length !== texts.length) {
+          throw new Error(
+            `Embedding API returned ${embeddings?.length ?? 0} vectors for ${texts.length} inputs`,
+          );
+        }
+        return embeddings.map((e, i) => {
+          if (!e.values) {
+            throw new Error(`Embedding API returned no values for input index ${i}`);
+          }
+          return e.values;
+        });
+      },
+      (waitMs) => setActiveSpanAttribute('ratelimit.queue_wait_ms', waitMs),
+    );
   }
 
   async embedNodes(nodes: EntityNode[]): Promise<EntityNode[]> {

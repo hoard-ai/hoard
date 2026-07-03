@@ -1,3 +1,5 @@
+import { setMaxListeners } from 'events';
+
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 import { UndirectedGraph } from 'graphology';
@@ -15,7 +17,6 @@ import {
   type SpanMetrics,
 } from '@/observability';
 
-import { LLM_CONCURRENCY_LIMIT, withConcurrency } from '../batch-utils';
 import { EmbeddingService } from '../embedding';
 import { Community, createCommunity } from '../models';
 import {
@@ -80,8 +81,24 @@ export class CommunityService {
     @Inject(LLM_TRACER) private readonly llmTracer: LlmTracer,
   ) {}
 
-  async buildCommunities(userId: Uuid, graphId: Uuid, ctx?: LlmContext): Promise<void> {
-    await this.buildCommunitiesImpl(userId, graphId, ctx);
+  async buildCommunities(
+    userId: Uuid,
+    graphId: Uuid,
+    ctx?: LlmContext,
+    jobAbortSignal?: AbortSignal,
+  ): Promise<void> {
+    const abort = new AbortController();
+    const signal = jobAbortSignal
+      ? AbortSignal.any([jobAbortSignal, abort.signal])
+      : abort.signal;
+    setMaxListeners(0, signal);
+
+    try {
+      await this.buildCommunitiesImpl(userId, graphId, ctx, signal);
+    } catch (e) {
+      abort.abort();
+      throw e;
+    }
   }
 
   @Span('buildCommunities', { onResult: metricsOnResult })
@@ -89,6 +106,7 @@ export class CommunityService {
     userId: Uuid,
     graphId: Uuid,
     ctx?: LlmContext,
+    abortSignal?: AbortSignal,
   ): Promise<{ metrics: SpanMetrics }> {
     const startMs = performance.now();
     const baseMetrics: SpanMetrics = {
@@ -96,7 +114,7 @@ export class CommunityService {
       'session.id': ctx?.sessionId,
       'graph.id': graphId,
     };
-    const model = await this.llmService.getActiveModel(userId);
+    const model = await this.llmService.getActiveModel(userId, { abortSignal });
 
     // 1. Build the weighted graph and detect communities via Louvain.
     const nodeIds = await this.entityNodeRepo.findIdsForGraph(graphId);
@@ -161,10 +179,9 @@ export class CommunityService {
     //    output is mostly collision-free; the resolver below cleans up the
     //    residual collisions across the freshly named set.
     const existingNames = existing.map((e) => e.name);
-    const pending = await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
-      routes.map(
-        (route, idx) => () => this.executeRoute(route, idx, model, existingNames, ctx),
+    const pending = await Promise.all(
+      routes.map((route, idx) =>
+        this.executeRoute(route, idx, model, existingNames, ctx),
       ),
     );
 
@@ -202,9 +219,8 @@ export class CommunityService {
       (p): p is Extract<PendingRoute, { kind: 'full' | 'incremental' }> =>
         p.kind === 'full' || p.kind === 'incremental',
     );
-    const embeddings = await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
-      toEmbed.map((p) => () => this.embeddingService.embedText(p.name)),
+    const embeddings = await Promise.all(
+      toEmbed.map((p) => this.embeddingService.embedText(p.name)),
     );
     const embeddingByTempId = new Map<number, number[] | null>();
     for (let i = 0; i < toEmbed.length; i++) {
@@ -321,8 +337,15 @@ export class CommunityService {
     graphId: Uuid,
     entityId: Uuid,
     ctx?: LlmContext,
+    jobAbortSignal?: AbortSignal,
   ): Promise<void> {
-    await this.updateCommunityForEntityImpl(userId, graphId, entityId, ctx);
+    await this.updateCommunityForEntityImpl(
+      userId,
+      graphId,
+      entityId,
+      ctx,
+      jobAbortSignal,
+    );
   }
 
   @Span('updateCommunityForEntity', { onResult: metricsOnResult })
@@ -331,6 +354,7 @@ export class CommunityService {
     graphId: Uuid,
     entityId: Uuid,
     ctx?: LlmContext,
+    jobAbortSignal?: AbortSignal,
   ): Promise<{ metrics: SpanMetrics }> {
     const startMs = performance.now();
     const baseMetrics: SpanMetrics = {
@@ -369,7 +393,9 @@ export class CommunityService {
         },
       };
     }
-    const model = await this.llmService.getActiveModel(userId);
+    const model = await this.llmService.getActiveModel(userId, {
+      abortSignal: jobAbortSignal,
+    });
 
     const newSummary = await this.summarizePair(
       model,
@@ -470,9 +496,8 @@ export class CommunityService {
         pairs.push([summaries[i], summaries[half + i]]);
       }
 
-      summaries = await withConcurrency(
-        LLM_CONCURRENCY_LIMIT,
-        pairs.map((pair) => () => this.summarizePair(model, pair, ctx)),
+      summaries = await Promise.all(
+        pairs.map((pair) => this.summarizePair(model, pair, ctx)),
       );
       if (odd !== null) summaries.push(odd);
     }

@@ -9,7 +9,7 @@
 import { type Span as ApiSpan, SpanStatusCode, trace } from '@opentelemetry/api';
 import 'reflect-metadata';
 
-import { isLangfuseEnabled } from '../langfuse-state';
+import { isLangfuseEnabled } from '../observability-utils';
 import type { ExtendedSpanOptions, ObservationKind } from '../types';
 import { safeStringify } from './serialize';
 

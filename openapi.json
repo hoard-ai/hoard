@@ -1327,12 +1327,17 @@
           {
             "type": "object",
             "properties": {
+              "model": {
+                "type": "string"
+              },
+              "concurrency": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
               "provider": {
                 "type": "string",
                 "const": "ANTHROPIC"
-              },
-              "model": {
-                "type": "string"
               },
               "temperature": {
                 "type": "number",
@@ -1363,12 +1368,17 @@
           {
             "type": "object",
             "properties": {
+              "model": {
+                "type": "string"
+              },
+              "concurrency": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
               "provider": {
                 "type": "string",
                 "const": "GOOGLE_GEMINI"
-              },
-              "model": {
-                "type": "string"
               },
               "temperature": {
                 "type": "number",
@@ -1479,13 +1489,18 @@
           {
             "type": "object",
             "properties": {
-              "provider": {
-                "type": "string",
-                "const": "ANTHROPIC"
-              },
               "model": {
                 "type": "string",
                 "minLength": 1
+              },
+              "concurrency": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "provider": {
+                "type": "string",
+                "const": "ANTHROPIC"
               },
               "temperature": {
                 "type": "number",
@@ -1503,20 +1518,25 @@
               }
             },
             "required": [
-              "provider",
-              "model"
+              "model",
+              "provider"
             ]
           },
           {
             "type": "object",
             "properties": {
-              "provider": {
-                "type": "string",
-                "const": "GOOGLE_GEMINI"
-              },
               "model": {
                 "type": "string",
                 "minLength": 1
+              },
+              "concurrency": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "provider": {
+                "type": "string",
+                "const": "GOOGLE_GEMINI"
               },
               "temperature": {
                 "type": "number",
@@ -1534,8 +1554,8 @@
               }
             },
             "required": [
-              "provider",
-              "model"
+              "model",
+              "provider"
             ]
           }
         ],

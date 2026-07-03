@@ -2,6 +2,7 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 
 import { Uuid } from '@/common/schemas';
+import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { invokeStructured } from '@/llm';
 import {
   LLM_TRACER,
@@ -12,7 +13,7 @@ import {
   type SpanMetrics,
 } from '@/observability';
 
-import { LLM_CONCURRENCY_LIMIT, withConcurrency } from '../batch-utils';
+import { withConcurrency } from '../batch-utils';
 import type { EntityTypeMap } from '../episode/types';
 import { createEntityNode, EntityEdge, EntityNode, type EpisodicNode } from '../models';
 import {
@@ -47,7 +48,10 @@ function resolveLabels(
 
 @Injectable()
 export class NodeExtractionService {
-  constructor(@Inject(LLM_TRACER) private readonly llmTracer: LlmTracer) {}
+  constructor(
+    @Inject(LLM_TRACER) private readonly llmTracer: LlmTracer,
+    private readonly kgConfig: KnowledgeGraphConfigService,
+  ) {}
 
   async extractNodes(
     model: BaseChatModel,
@@ -87,19 +91,17 @@ export class NodeExtractionService {
     chunkIndicesByNodeId: Map<Uuid, Set<number>>;
     metrics: SpanMetrics;
   }> {
-    const perChunk = await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
-      chunks.map(
-        (chunk) => () =>
-          this.extractNodesFromChunk(
-            model,
-            { ...episode, content: chunk },
-            previousEpisodes,
-            entityTypes,
-            customInstructions,
-            excludedEntityTypes,
-            ctx,
-          ),
+    const perChunk = await Promise.all(
+      chunks.map((chunk) =>
+        this.extractNodesFromChunk(
+          model,
+          { ...episode, content: chunk },
+          previousEpisodes,
+          entityTypes,
+          customInstructions,
+          excludedEntityTypes,
+          ctx,
+        ),
       ),
     );
     // Deduplicate nodes across chunks by case-insensitive name (first occurrence
@@ -238,7 +240,7 @@ export class NodeExtractionService {
         node.attributes = { ...node.attributes, ...attrs };
       });
     }
-    await withConcurrency(LLM_CONCURRENCY_LIMIT, tasks);
+    await withConcurrency(this.kgConfig.memoryBackpressureConcurrencyLimit, tasks);
 
     return { metrics: { ...baseMetrics, 'extracted.count': tasks.length } };
   }
@@ -365,7 +367,7 @@ export class NodeExtractionService {
         });
       }
     }
-    await withConcurrency(LLM_CONCURRENCY_LIMIT, tasks);
+    await withConcurrency(this.kgConfig.memoryBackpressureConcurrencyLimit, tasks);
 
     for (const node of nodes) {
       const summary = summaryMap.get(node.name);

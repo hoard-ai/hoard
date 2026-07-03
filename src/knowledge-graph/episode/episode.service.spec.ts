@@ -3,6 +3,7 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Test, TestingModule } from '@nestjs/testing';
 
 import { Uuid, UuidSchema } from '@/common/schemas';
+import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { LlmService } from '@/llm/llm.service';
 import { LLM_TRACER, NoOpLlmTracer } from '@/observability';
 import { PrismaService } from '@/providers/database/postgres/prisma.service';
@@ -69,7 +70,14 @@ describe('EpisodeService', () => {
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
-      providers: [EpisodeService, { provide: LLM_TRACER, useValue: new NoOpLlmTracer() }],
+      providers: [
+        EpisodeService,
+        { provide: LLM_TRACER, useValue: new NoOpLlmTracer() },
+        {
+          provide: KnowledgeGraphConfigService,
+          useValue: { memoryBackpressureConcurrencyLimit: 10 },
+        },
+      ],
     })
       .useMocker(createMock)
       .compile();

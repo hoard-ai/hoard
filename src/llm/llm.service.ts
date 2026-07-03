@@ -5,8 +5,10 @@ import { LlmConfig, LlmProvider } from '@generated/prisma/client';
 
 import { Uuid } from '@/common/schemas';
 import { LlmConfigService } from '@/config/llm';
+import { setActiveSpanAttribute } from '@/observability';
 import { CryptoService } from '@/providers/crypto';
 import { PrismaService } from '@/providers/database/postgres';
+import { RateLimiterService } from '@/providers/rate-limit';
 
 import {
   ActiveProviderResponse,
@@ -18,6 +20,7 @@ import {
   TestConfigResponse,
 } from './dto';
 import { LlmFactoryService } from './factory/llm-factory.service';
+import { DEFAULT_MODEL_CONCURRENCY, GetActiveModelOptions } from './types';
 
 @Injectable()
 export class LlmService {
@@ -26,6 +29,7 @@ export class LlmService {
     private readonly factory: LlmFactoryService,
     private readonly llmConfig: LlmConfigService,
     private readonly crypto: CryptoService,
+    private readonly rateLimiter: RateLimiterService,
   ) {}
 
   private parseConfigRow(row: LlmConfig): SaveLlmConfig {
@@ -43,6 +47,7 @@ export class LlmService {
     return LlmConfigResponseSchema.parse({
       provider: config.provider,
       model: config.model,
+      concurrency: config.concurrency,
       temperature: config.temperature,
       topK: config.topK,
       hasApiKey: !!config.apiKey,
@@ -196,7 +201,10 @@ export class LlmService {
     if (provider === LlmProvider.PLATFORM) {
       throw new BadRequestException('Platform model is not testable');
     }
-    const model = await this.getActiveModel(userId, provider);
+    const model = await this.getActiveModel(userId, {
+      providerOverride: provider,
+      rateLimited: false,
+    });
     const start = Date.now();
 
     try {
@@ -220,10 +228,22 @@ export class LlmService {
     }
   }
 
+  /**
+   * Resolves the user's active provider into a ready-to-use chat model.
+   *
+   * By default (`rateLimited` defaults to `true`) the returned model's
+   * `_generate` is gated by the per-credential concurrency limiter; pass
+   * `rateLimited: false` for latency-sensitive interactive paths (e.g. the agent
+   * chat loop) that must not queue. Bulk work like the cross-encoder reranker
+   * stays rate limited. The shared PLATFORM key is always rate limited - it cannot
+   * bypass its pool. `abortSignal` scopes cancellation to this model, and
+   * `providerOverride` bypasses the user's `activeLlmProvider` lookup.
+   */
   async getActiveModel(
     userId: Uuid,
-    providerOverride?: LlmProvider,
+    opts: GetActiveModelOptions = {},
   ): Promise<BaseChatModel> {
+    const { providerOverride, rateLimited = true, abortSignal } = opts;
     const provider =
       providerOverride ??
       (
@@ -237,7 +257,13 @@ export class LlmService {
       throw new BadRequestException('No active LLM provider is set');
     }
     if (provider === LlmProvider.PLATFORM) {
-      return this.factory.createPlatformModel();
+      const model = this.factory.createPlatformModel();
+      return this.wrapRateLimited(
+        model,
+        'platform',
+        this.llmConfig.platformMaxConcurrency,
+        abortSignal,
+      );
     }
 
     const configRow = await this.prisma.llmConfig.findUnique({
@@ -252,9 +278,58 @@ export class LlmService {
       throw new BadRequestException(`Provider ${provider} is missing an API key`);
     }
 
-    return this.factory.createModel({
+    const model = this.factory.createModel({
       ...config,
       apiKey: this.crypto.decrypt(config.apiKey),
     });
+    if (!rateLimited) return model;
+
+    // BYO key: rate limit scoped per credential
+    const key = `user:${userId}:${provider}`;
+    const limit = config.concurrency ?? DEFAULT_MODEL_CONCURRENCY;
+    return this.wrapRateLimited(model, key, limit, abortSignal);
   }
+
+  /**
+   * Gates `model`'s `_generate` through the rate-limiter pool `key` (max `limit`
+   * concurrent). The permit is acquired pre-dispatch, so a queued call holds no
+   * HTTP connection and starts no request-timeout clock while it waits.
+   * `abortSignal` rejects queued acquires and cancels in-flight requests.
+   */
+  private wrapRateLimited(
+    model: BaseChatModel,
+    key: string,
+    limit: number,
+    abortSignal?: AbortSignal,
+  ): BaseChatModel {
+    // TODO: Add request timeouts
+    const holder = model as unknown as {
+      _generate: (...args: GenerateParams) => GenerateReturn;
+    };
+    const orig = holder._generate.bind(model);
+
+    // Own-property shadow of the prototype method: BaseChatModel routes both
+    // invoke() and withStructuredOutput().invoke() through `this._generate`.
+    holder._generate = (...args: GenerateParams): GenerateReturn => {
+      const [messages, options, runManager] = args;
+      const signal = mergeSignals(abortSignal, options.signal);
+      const nextOptions = { ...options, signal } as GenerateParams[1];
+      return this.rateLimiter.schedule(
+        key,
+        limit,
+        signal,
+        () => orig(messages, nextOptions, runManager),
+        (waitMs) => setActiveSpanAttribute('ratelimit.queue_wait_ms', waitMs),
+      );
+    };
+    return model;
+  }
+}
+
+type GenerateParams = Parameters<BaseChatModel['_generate']>;
+type GenerateReturn = ReturnType<BaseChatModel['_generate']>;
+
+function mergeSignals(a?: AbortSignal, b?: AbortSignal): AbortSignal | undefined {
+  if (a && b) return AbortSignal.any([a, b]);
+  return a ?? b;
 }

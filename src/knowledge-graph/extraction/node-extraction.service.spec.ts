@@ -3,6 +3,7 @@ import { mockDeep } from 'jest-mock-extended';
 import { z } from 'zod';
 
 import { Uuid } from '@/common/schemas';
+import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { NoOpLlmTracer } from '@/observability';
 import { KG_TEST_GRAPH_ID, KgEdgeFactory, KgNodeFactory, u } from '@/test/factories';
 
@@ -21,7 +22,9 @@ describe('NodeExtractionService', () => {
   let mockRunnable: { invoke: jest.Mock };
 
   beforeEach(() => {
-    service = new NodeExtractionService(new NoOpLlmTracer());
+    service = new NodeExtractionService(new NoOpLlmTracer(), {
+      memoryBackpressureConcurrencyLimit: 10,
+    } as KnowledgeGraphConfigService);
     mockModel = mockDeep<BaseChatModel>();
     mockRunnable = { invoke: jest.fn() };
     mockModel.withStructuredOutput.mockReturnValue(mockRunnable as never);

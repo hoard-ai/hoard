@@ -16,4 +16,8 @@ export class LlmConfigService {
   get platformModel(): string {
     return this.configService.get<string>('llm.platformModel')!;
   }
+
+  get platformMaxConcurrency(): number {
+    return this.configService.get<number>('llm.platformMaxConcurrency')!;
+  }
 }

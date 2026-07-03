@@ -1,7 +1,10 @@
+import { setMaxListeners } from 'events';
+
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 
 import type { Uuid } from '@/common/schemas';
+import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { invokeStructured } from '@/llm';
 import { LlmService } from '@/llm/llm.service';
 import {
@@ -16,7 +19,6 @@ import { PrismaService } from '@/providers/database/postgres/prisma.service';
 
 import {
   buildDirectedIdMap,
-  LLM_CONCURRENCY_LIMIT,
   reassembleByOffsets,
   resolveEdgePointers,
   withConcurrency,
@@ -82,6 +84,7 @@ export class EpisodeService {
     private readonly episodicEdgeRepository: EpisodicEdgeRepository,
     private readonly sagaRepository: SagaRepository,
     private readonly prisma: PrismaService,
+    private readonly kgConfig: KnowledgeGraphConfigService,
     @Inject(LLM_TRACER) private readonly llmTracer: LlmTracer,
   ) {}
 
@@ -338,12 +341,26 @@ export class EpisodeService {
       customInstructions: parsed.customInstructions,
       updateCommunities,
     };
-    const model = await this.llmService.getActiveModel(userId);
+    // TODO: add abort on job cancellation when moving to ingestion within a job
+    // See community service for implementation
+    const abort = new AbortController();
+
+    // In-flight requests each attach a signal listener; the pool size can exceed
+    // Node's default 10-listener warning threshold.
+    setMaxListeners(0, abort.signal);
+    const model = await this.llmService.getActiveModel(userId, {
+      abortSignal: abort.signal,
+    });
 
     const { items, batch } = await this.preparePhase(parsed);
-    await this.nodesPhase(items, batch, model, cfg, ctx);
-    await this.edgesPhase(items, batch, model, cfg, ctx);
-    await this.enrichPhase(items, batch, model, cfg, ctx);
+    try {
+      await this.nodesPhase(items, batch, model, cfg, ctx);
+      await this.edgesPhase(items, batch, model, cfg, ctx);
+      await this.enrichPhase(items, batch, model, cfg, ctx);
+    } catch (e) {
+      abort.abort();
+      throw e;
+    }
     await this.persistPhase(items, batch);
 
     // The maintenance service routes each distinct graph to a
@@ -514,7 +531,7 @@ export class EpisodeService {
   ): Promise<{ metrics: SpanMetrics }> {
     // Extract nodes per episode
     const nodeExtractions = await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
+      this.kgConfig.memoryBackpressureConcurrencyLimit,
       items.map(
         (it) => () =>
           this.nodeExtractionService.extractNodes(
@@ -549,7 +566,7 @@ export class EpisodeService {
     // candidates; seed the registry + existing-id set so a new node can collapse
     // onto an existing one even when that existing one wasn't in its candidate set.
     const resolutions = await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
+      this.kgConfig.memoryBackpressureConcurrencyLimit,
       items.map(
         (it) => () =>
           this.nodeResolutionService.resolveNodes(
@@ -651,7 +668,7 @@ export class EpisodeService {
   ): Promise<{ metrics: SpanMetrics }> {
     // Extract edges per episode using this episode's canonical nodes.
     const edgeExtractions = await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
+      this.kgConfig.memoryBackpressureConcurrencyLimit,
       items.map(
         (it) => () =>
           this.edgeExtractionService.extractEdges(
@@ -722,7 +739,7 @@ export class EpisodeService {
     // timestamps are touched here - contradictions are recorded and resolved
     // after enrichment fills validAt/invalidAt.
     const dedupes = await withConcurrency(
-      LLM_CONCURRENCY_LIMIT,
+      this.kgConfig.memoryBackpressureConcurrencyLimit,
       items.map(
         (it) => () =>
           this.edgeResolutionService.dedupeEdges(

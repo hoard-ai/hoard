@@ -15,7 +15,7 @@ import {
 } from '@opentelemetry/sdk-trace-node';
 import 'reflect-metadata';
 
-import { isLangfuseEnabled, setLangfuseEnabled } from '../langfuse-state';
+import { isLangfuseEnabled, setLangfuseEnabled } from '../observability-utils';
 import { Span } from './span.decorator';
 
 const TestDecoratorThatSetsMetadata = (): MethodDecorator =>

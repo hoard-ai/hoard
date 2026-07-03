@@ -162,6 +162,44 @@ To turn it on for local dev:
 
 When running the app inside the docker network instead of on the host, also set `LANGFUSE_BASE_URL=http://langfuse-web:3000` (the in-network hostname). The default in `.env.example` points at the host-mapped port `http://localhost:3334`.
 
+## Concurrency & rate limiting
+
+The ingestion pipeline touches rate-limited provider APIs (chat + embeddings) and
+builds large prompts, so concurrency is bounded on three distinct axes.
+
+### 1. Provider rate limit - `RateLimiterService`
+
+A distributed, Redis-backed semaphore (`src/providers/rate-limit`) bounds
+concurrent in-flight provider calls **per credential (token)**, across worker processes,
+with crash-safe leases.
+
+- **Chat models** are gated at the model's generation function; the LLM service
+  returns a rate-limited model by default. Each pool is keyed by the credential
+  owner (a user's own key, or the shared platform key), with the limit from that
+  credential's config.
+- **Embeddings** don't go through a chat model, so the embedding service gates
+  its own provider calls through a dedicated pool.
+
+**Quirks:**
+
+- The **interactive agent** bypasses the limiter so a live conversation never
+  queues behind background ingestion.
+- The shared **platform** pool is always rate limited and cannot be bypassed.
+- Cancellation rides on the model: an ingestion-scoped `AbortSignal` rejects
+  queued acquires and cancels in-flight requests.
+
+### 2. Memory backpressure - `withConcurrency` (`MEMORY_BACKPRESSURE_CONCURRENCY_LIMIT`)
+
+`withConcurrency` (`batch-utils`) is not a rate limit - it caps how many
+large prompts are materialized at once, per fan-out. It survives only where a
+fan-out builds ~MB-scale prompts (previous-episodes context is currently
+untruncated) and isn't already bounded by a caller-level per-episode cap:
+
+### 3. Worker job parallelism (BullMQ `@Processor` concurrency)
+
+How many jobs a queue worker runs at once - orthogonal to the above (each job
+still draws on the semaphores internally).
+
 ## Acknowledgements
 
 The knowledge graph pipeline in this project is a modified TypeScript port of [Graphiti](https://github.com/getzep/graphiti) by Zep AI, adapted for this codebase for the following reasons:

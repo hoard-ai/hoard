@@ -20,4 +20,8 @@ export class EmbeddingConfigService {
   get dimensions(): number {
     return this.configService.get<number>('embedding.dimensions')!;
   }
+
+  get concurrencyLimit(): number {
+    return this.configService.get<number>('embedding.concurrencyLimit')!;
+  }
 }

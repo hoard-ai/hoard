@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { KnowledgeGraphConfigModule } from '@/config/knowledge-graph';
 import { LlmModule } from '@/llm/llm.module';
 
 import { CommunityModule } from '../community/community.module';
@@ -17,6 +18,7 @@ import { EpisodeService } from './episode.service';
     ResolutionModule,
     CommunityModule,
     RepositoryModule,
+    KnowledgeGraphConfigModule,
   ],
   providers: [EpisodeService],
   exports: [EpisodeService],

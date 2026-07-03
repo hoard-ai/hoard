@@ -32,14 +32,23 @@ export class CommunityRebuildConsumer extends BaseQueueConsumer {
   }
 
   @Span('community-rebuild', { asLangfuseTrace: true })
-  async process(job: Job<CommunityRebuildJobData>): Promise<void> {
+  async process(
+    job: Job<CommunityRebuildJobData>,
+    _token?: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const { userId, graphId } = job.data;
     try {
-      await this.communityService.buildCommunities(userId, graphId, {
+      await this.communityService.buildCommunities(
         userId,
-        tags: ['knowledge-graph', 'community-rebuild', `graph:${graphId}`],
-        metadata: { trigger: 'episode-debounced', jobId: job.id ?? '' },
-      });
+        graphId,
+        {
+          userId,
+          tags: ['knowledge-graph', 'community-rebuild', `graph:${graphId}`],
+          metadata: { trigger: 'episode-debounced', jobId: job.id ?? '' },
+        },
+        signal,
+      );
     } catch (err) {
       if (this.isTestTeardownError(err)) return;
       this.logger.error(`Community rebuild failed for graph ${graphId}`, err);

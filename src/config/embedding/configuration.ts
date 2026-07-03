@@ -9,6 +9,7 @@ const envSchema = z.object({
   GOOGLE_EMBEDDING_API_KEY: z.string().optional(),
   GOOGLE_EMBEDDING_MODEL: z.string().default('gemini-embedding-2'),
   GOOGLE_EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().default(768),
+  EMBEDDING_CONCURRENCY_LIMIT: z.coerce.number().int().positive().default(10),
 });
 
 export default registerAs('embedding', () => {
@@ -18,5 +19,6 @@ export default registerAs('embedding', () => {
     googleApiKey: env.GOOGLE_EMBEDDING_API_KEY,
     googleModel: env.GOOGLE_EMBEDDING_MODEL,
     dimensions: env.GOOGLE_EMBEDDING_DIMENSIONS,
+    concurrencyLimit: env.EMBEDDING_CONCURRENCY_LIMIT,
   };
 });

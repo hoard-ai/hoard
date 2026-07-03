@@ -3,6 +3,7 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Test, TestingModule } from '@nestjs/testing';
 
 import { Uuid } from '@/common';
+import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { LLM_TRACER, NoOpLlmTracer } from '@/observability';
 import {
   KG_HIGH_SIM_EMBEDDING,
@@ -56,6 +57,10 @@ describe('EdgeResolutionService', () => {
       providers: [
         EdgeResolutionService,
         { provide: LLM_TRACER, useValue: new NoOpLlmTracer() },
+        {
+          provide: KnowledgeGraphConfigService,
+          useValue: { memoryBackpressureConcurrencyLimit: 10 },
+        },
       ],
     })
       .useMocker(createMock)
