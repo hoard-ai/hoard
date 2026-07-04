@@ -1,15 +1,14 @@
 import { handler, spec } from 'pactum';
-import { ExpectHandlerContext } from 'pactum/src/exports/handler';
+import type { ExpectHandlerContext } from 'pactum/src/exports/handler';
 
+import type { LlmConfigResponse, UserWithoutPassword } from '@test/types';
 import {
-  LlmConfigResponse,
   LlmConfigResponseSchema,
   LlmProvidersListSchema,
   LoginResponseSchema,
   LogoutResponseSchema,
   SignupResponseSchema,
   TestConfigResponseSchema,
-  UserWithoutPassword,
   UserWithoutPasswordSchema,
 } from '@test/types';
 

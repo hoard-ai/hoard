@@ -1,15 +1,17 @@
-import { createMock, DeepMocked } from '@golevelup/ts-jest';
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { BaseMessage } from '@langchain/core/messages';
-import { Test, TestingModule } from '@nestjs/testing';
+import type { DeepMocked } from '@golevelup/ts-jest';
+import { createMock } from '@golevelup/ts-jest';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { BaseMessage } from '@langchain/core/messages';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { LlmService } from '@/llm/llm.service';
 import { LLM_TRACER, NoOpLlmTracer } from '@/observability';
 import { KG_TEST_GRAPH_ID, KG_TEST_USER_ID, u } from '@/test/factories';
 
 import { EmbeddingService } from '../embedding';
-import { Community } from '../models';
+import type { Community } from '../models';
 import {
   type ClusterMatch,
   CommunityRepository,
@@ -17,7 +19,7 @@ import {
   EntityNodeRepository,
   type ExistingCommunitySnapshot,
 } from '../repository/repositories';
-import { NodeName } from '../types';
+import type { NodeName } from '../types';
 import { summaryHash } from './community-utils';
 import { CommunityService } from './community.service';
 

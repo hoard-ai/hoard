@@ -1,6 +1,7 @@
 import { SubQueryType } from '@/knowledge-graph/search/types';
 
-import { AgentStep, buildAgentStepValidator } from './agent.service';
+import type { AgentStep } from './agent.service';
+import { buildAgentStepValidator } from './agent.service';
 
 describe('buildAgentStepValidator', () => {
   const shown = new Set([0, 1, 2]);

@@ -1,6 +1,6 @@
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 
-import { EntityEdge, EntityNode, EpisodicNode } from '../../models';
+import type { EntityEdge, EntityNode, EpisodicNode } from '../../models';
 
 // TODO: fixed size assumes small chunks - make adaptive on the summary prompt's
 // token budget (the episode-text chunk union + node payload) so large chunks

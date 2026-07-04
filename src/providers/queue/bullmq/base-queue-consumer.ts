@@ -1,6 +1,7 @@
 import { WorkerHost } from '@nestjs/bullmq';
-import { Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
-import { Queue } from 'bullmq';
+import type { OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
+import type { Queue } from 'bullmq';
 
 import { Environment } from '@/config/app/configuration';
 

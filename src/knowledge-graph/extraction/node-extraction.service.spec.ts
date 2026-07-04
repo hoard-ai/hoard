@@ -1,13 +1,13 @@
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { mockDeep } from 'jest-mock-extended';
 import { z } from 'zod';
 
-import { Uuid } from '@/common/schemas';
-import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
+import type { Uuid } from '@/common/schemas';
+import type { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { NoOpLlmTracer } from '@/observability';
 import { KG_TEST_GRAPH_ID, KgEdgeFactory, KgNodeFactory, u } from '@/test/factories';
 
-import { EpisodicNode } from '../models';
+import type { EpisodicNode } from '../models';
 import { NodeExtractionService } from './node-extraction.service';
 
 const baseEpisode = KgNodeFactory.createEpisodicNode({

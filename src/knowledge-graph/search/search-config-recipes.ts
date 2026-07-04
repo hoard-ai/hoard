@@ -1,3 +1,4 @@
+import type { SearchConfigInput } from './types';
 import {
   CommunityReranker,
   CommunitySearchMethod,
@@ -9,7 +10,6 @@ import {
   EpisodeSearchMethod,
   NodeReranker,
   NodeSearchMethod,
-  SearchConfigInput,
 } from './types';
 
 // NOTE: None of these recipes include temporal filters, matching the Python

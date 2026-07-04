@@ -1,8 +1,11 @@
-import { createMock, DeepMocked } from '@golevelup/ts-jest';
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { DeepMocked } from '@golevelup/ts-jest';
+import { createMock } from '@golevelup/ts-jest';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
-import { Test, TestingModule } from '@nestjs/testing';
-import { DeepMockProxy, mockDeep, mockReset } from 'jest-mock-extended';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
+import type { DeepMockProxy } from 'jest-mock-extended';
+import { mockDeep, mockReset } from 'jest-mock-extended';
 
 import { LlmProvider } from '@generated/prisma/client';
 

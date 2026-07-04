@@ -1,11 +1,10 @@
-import {
-  Graph as PrismaGraph,
-  Role as PrismaRole,
-  User as PrismaUser,
-} from '@generated/prisma/client';
+import type { Graph as PrismaGraph, User as PrismaUser } from '@generated/prisma/client';
+import { Role as PrismaRole } from '@generated/prisma/client';
 
-import { Uuid, UuidSchema } from '@/common/schemas';
-import { Role, RoleSchema, User, UserWithoutPassword } from '@/user/dto';
+import type { Uuid } from '@/common/schemas';
+import { UuidSchema } from '@/common/schemas';
+import type { Role, User, UserWithoutPassword } from '@/user/dto';
+import { RoleSchema } from '@/user/dto';
 
 export type PrismaUserWithGraphs = PrismaUser & { graphs: PrismaGraph[] };
 

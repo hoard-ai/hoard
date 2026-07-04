@@ -1,5 +1,5 @@
-import { Uuid } from '@/common/schemas';
-import { EntityEdge } from '@/knowledge-graph/models';
+import type { Uuid } from '@/common/schemas';
+import type { EntityEdge } from '@/knowledge-graph/models';
 
 class CountingSemaphore {
   private count: number;

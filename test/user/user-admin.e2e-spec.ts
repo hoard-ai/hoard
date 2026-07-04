@@ -6,7 +6,7 @@ import {
   TestHelpers as h,
   TestSetup as s,
 } from '@test/setup';
-import { PaginatedUsers, User } from '@test/types';
+import type { PaginatedUsers, User } from '@test/types';
 
 describe('User Admin (e2e)', () => {
   describe('POST /users (Admin Only)', () => {

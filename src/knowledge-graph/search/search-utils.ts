@@ -1,11 +1,11 @@
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { invokeStructured } from '@/llm';
 import type { LlmContext, LlmTracer } from '@/observability';
 
-import { EntityNodeRepository } from '../repository/repositories';
+import type { EntityNodeRepository } from '../repository/repositories';
 import {
   CrossEncoderScoreSchema,
   DEFAULT_MMR_LAMBDA,

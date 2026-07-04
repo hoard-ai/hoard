@@ -1,6 +1,7 @@
 import { spec } from 'pactum';
 
-import { Role, User } from '@test/types';
+import type { User } from '@test/types';
+import { Role } from '@test/types';
 
 import { DatabaseUtils } from './database-utils';
 import { TestDataFactory } from './test-data-factory';

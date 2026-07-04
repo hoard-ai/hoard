@@ -1,6 +1,7 @@
-import { createParamDecorator, ExecutionContext } from '@nestjs/common';
+import type { ExecutionContext } from '@nestjs/common';
+import { createParamDecorator } from '@nestjs/common';
 
-import { UserWithoutPassword } from '@/user/dto';
+import type { UserWithoutPassword } from '@/user/dto';
 
 export const GetUser = createParamDecorator(
   (data: keyof UserWithoutPassword | undefined, ctx: ExecutionContext) => {

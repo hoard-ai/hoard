@@ -1,9 +1,10 @@
-import { Uuid } from '@/common';
+import type { Uuid } from '@/common';
 
-import { NodeEpisodeContext } from '../extraction';
-import { EntityNode, EpisodicNode } from '../models';
-import { NodeLabel, NodeLabels, NodeLabelSchema, RelationshipType } from '../types';
-import { EdgeTypeMap, EdgeTypeMappings } from './types';
+import type { NodeEpisodeContext } from '../extraction';
+import type { EntityNode, EpisodicNode } from '../models';
+import type { NodeLabel, NodeLabels, RelationshipType } from '../types';
+import { NodeLabelSchema } from '../types';
+import type { EdgeTypeMap, EdgeTypeMappings } from './types';
 
 export function edgeTypeKey(source: NodeLabel, target: NodeLabel): string {
   return `${source},${target}`;

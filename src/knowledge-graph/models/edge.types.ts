@@ -2,9 +2,11 @@ import { randomUUID } from 'node:crypto';
 
 import { z } from 'zod';
 
-import { Uuid, UuidSchema } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
+import { UuidSchema } from '@/common/schemas';
 
-import { RelationshipType, RelationshipTypeSchema } from '../types';
+import type { RelationshipType } from '../types';
+import { RelationshipTypeSchema } from '../types';
 
 // Schemas
 

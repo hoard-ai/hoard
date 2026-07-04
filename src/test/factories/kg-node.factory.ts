@@ -1,13 +1,10 @@
+import type { Community, EntityNode, EpisodicNode, Saga } from '@/knowledge-graph/models';
 import {
-  Community,
   createCommunity,
   createEntityNode,
   createEpisodicNode,
   createSaga,
-  EntityNode,
   EpisodeType,
-  EpisodicNode,
-  Saga,
 } from '@/knowledge-graph/models';
 import {
   NodeLabelSchema,

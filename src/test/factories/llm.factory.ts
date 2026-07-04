@@ -1,11 +1,8 @@
-import { LlmConfig, LlmProvider, Prisma } from '@generated/prisma/client';
+import type { LlmConfig, Prisma } from '@generated/prisma/client';
+import { LlmProvider } from '@generated/prisma/client';
 
-import {
-  LlmConfigResponse,
-  LlmConfigResponseSchema,
-  SaveLlmConfig,
-  SaveLlmConfigSchema,
-} from '@/llm/dto';
+import type { LlmConfigResponse, SaveLlmConfig } from '@/llm/dto';
+import { LlmConfigResponseSchema, SaveLlmConfigSchema } from '@/llm/dto';
 
 import { TEST_USER_UUID, UserFactory } from './user.factory';
 

@@ -1,7 +1,9 @@
-import { createMock, DeepMocked } from '@golevelup/ts-jest';
+import type { DeepMocked } from '@golevelup/ts-jest';
+import { createMock } from '@golevelup/ts-jest';
 import { InternalServerErrorException } from '@nestjs/common';
-import { Test, TestingModule } from '@nestjs/testing';
-import { Request } from 'express';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
+import type { Request } from 'express';
 
 import { AuthFactory, UserFactory } from '@/test/factories';
 

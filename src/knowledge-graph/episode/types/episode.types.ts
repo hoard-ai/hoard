@@ -1,17 +1,20 @@
 import { z } from 'zod';
 
-import { Uuid, UuidSchema } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
+import { UuidSchema } from '@/common/schemas';
 
-import {
+import type {
   EntityEdge,
-  EntityEdgeSchema,
   EntityNode,
-  EntityNodeSchema,
   EpisodicEdge,
-  EpisodicEdgeSchema,
   EpisodicNode,
-  EpisodicNodeSchema,
   Saga,
+} from '../../models';
+import {
+  EntityEdgeSchema,
+  EntityNodeSchema,
+  EpisodicEdgeSchema,
+  EpisodicNodeSchema,
 } from '../../models';
 import type {
   DedupeEdgesResult,
@@ -19,9 +22,9 @@ import type {
   EdgeResolutionResult,
   NodeResolutionResult,
 } from '../../resolution/types';
+import type { NodeLabel } from '../../types';
 import {
   EpisodeType,
-  NodeLabel,
   NodeLabelSchema,
   NodeNameSchema,
   RelationshipTypeSchema,

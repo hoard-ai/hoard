@@ -1,8 +1,10 @@
 import { z } from 'zod';
 
-import { Uuid, UuidSchema } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
+import { UuidSchema } from '@/common/schemas';
 
-import { EntityEdge, EntityEdgeSchema, EntityNodeSchema } from '../../models';
+import type { EntityEdge } from '../../models';
+import { EntityEdgeSchema, EntityNodeSchema } from '../../models';
 
 // Edge chunk provenance, keyed by edge id and qualified by origin episode, so a
 // cross-episode-merged edge resolves against the chunks it actually came from.

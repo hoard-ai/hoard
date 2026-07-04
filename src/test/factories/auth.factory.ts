@@ -1,4 +1,4 @@
-import { AuthDto } from '@/auth/dto';
+import type { AuthDto } from '@/auth/dto';
 
 export interface AuthDtoFactoryOptions {
   email?: string;

@@ -1,18 +1,13 @@
 import { z } from 'zod';
 
-import {
-  NodeLabel,
-  NodeLabels,
-  NodeLabelSchema,
-  RelationshipType,
-  RelationshipTypeSchema,
-} from '../types';
+import type { NodeLabel, NodeLabels, RelationshipType } from '../types';
+import { NodeLabelSchema, RelationshipTypeSchema } from '../types';
 import {
   edgeTypeKey,
   getApplicableEdgeTypes,
   getEffectiveTypeMappings,
 } from './episode-utils';
-import { EdgeTypeMap, EdgeTypeMappings } from './types';
+import type { EdgeTypeMap, EdgeTypeMappings } from './types';
 
 const label = (s: string): NodeLabel => NodeLabelSchema.parse(s);
 const rel = (s: string): RelationshipType => RelationshipTypeSchema.parse(s);

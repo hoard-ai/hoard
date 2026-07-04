@@ -1,5 +1,5 @@
 import { spec } from 'pactum';
-import { ExpectHandlerContext } from 'pactum/src/exports/handler';
+import type { ExpectHandlerContext } from 'pactum/src/exports/handler';
 
 import {
   TestAssertions as a,

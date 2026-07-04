@@ -1,9 +1,9 @@
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { mockDeep } from 'jest-mock-extended';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 
-import { EntityNodeRepository } from '../repository/repositories';
+import type { EntityNodeRepository } from '../repository/repositories';
 import {
   crossEncoderReranker,
   episodeMentionsReranker,

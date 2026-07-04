@@ -1,8 +1,11 @@
-import { createMock, DeepMocked } from '@golevelup/ts-jest';
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { Test, TestingModule } from '@nestjs/testing';
+import type { DeepMocked } from '@golevelup/ts-jest';
+import { createMock } from '@golevelup/ts-jest';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
 
-import { Uuid, UuidSchema } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
+import { UuidSchema } from '@/common/schemas';
 import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { LlmService } from '@/llm/llm.service';
 import { LLM_TRACER, NoOpLlmTracer } from '@/observability';
@@ -21,7 +24,7 @@ import {
 import { CommunityMaintenanceService } from '../community';
 import { EmbeddingService } from '../embedding';
 import { EdgeExtractionService, NodeExtractionService } from '../extraction';
-import { EntityEdge, EntityNode } from '../models';
+import type { EntityEdge, EntityNode } from '../models';
 import {
   EntityEdgeRepository,
   EntityNodeRepository,

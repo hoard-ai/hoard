@@ -1,7 +1,8 @@
-import { BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
+import type { BaseMessage } from '@langchain/core/messages';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 
-import { EpisodicNode } from '@/knowledge-graph/models';
+import type { EpisodicNode } from '@/knowledge-graph/models';
 import { NodeNameSchema } from '@/knowledge-graph/types';
 import type { Violation } from '@/llm';
 

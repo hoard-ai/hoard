@@ -1,4 +1,4 @@
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 
 import {
   buildDirectedIdMap,

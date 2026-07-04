@@ -1,11 +1,13 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
-import { Test, TestingModule } from '@nestjs/testing';
-import { DeepMockProxy, mockDeep, mockReset } from 'jest-mock-extended';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
+import type { DeepMockProxy } from 'jest-mock-extended';
+import { mockDeep, mockReset } from 'jest-mock-extended';
 
 import { LlmProvider, Prisma } from '@generated/prisma/client';
 
 import { PasswordService } from '@/auth/password.service';
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { PrismaService } from '@/providers/database/postgres';
 import {
   TEST_USER_UUID,
@@ -14,13 +16,13 @@ import {
   UserFactory,
 } from '@/test/factories';
 
-import {
+import type {
   DeleteSelfDto,
   GetUsersQueryDto,
-  RoleSchema,
   UpdateSelfDto,
   UpdateUserDto,
 } from './dto';
+import { RoleSchema } from './dto';
 import { UserService } from './user.service';
 
 const PrismaClientKnownRequestError = Prisma.PrismaClientKnownRequestError;

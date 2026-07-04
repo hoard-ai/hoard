@@ -1,12 +1,14 @@
-import { createMock, DeepMocked } from '@golevelup/ts-jest';
+import type { DeepMocked } from '@golevelup/ts-jest';
+import { createMock } from '@golevelup/ts-jest';
 import { BadRequestException } from '@nestjs/common';
-import { Test, TestingModule } from '@nestjs/testing';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
 
 import { LlmProvider } from '@generated/prisma/client';
 
 import { TEST_USER_UUID, TestLlmFactory } from '@/test/factories';
 
-import { ProviderParamDto, SaveLlmConfigDto, SetActiveProviderDto } from './dto';
+import type { ProviderParamDto, SaveLlmConfigDto, SetActiveProviderDto } from './dto';
 import { LlmController } from './llm.controller';
 import { LlmService } from './llm.service';
 

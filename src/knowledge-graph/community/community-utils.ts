@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 
 import type { ClusterMatch, ExistingCommunitySnapshot } from '../repository/repositories';
 

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import { UuidSchema } from '@/common/schemas';
-import { AddTextEpisodesOptionsInput } from '@/knowledge-graph/episode';
+import type { AddTextEpisodesOptionsInput } from '@/knowledge-graph/episode';
 import { NodeNameSchema } from '@/knowledge-graph/types';
 
 export const KG_TEST_USER_ID = UuidSchema.parse('00000000-0000-4000-8000-000000000042');

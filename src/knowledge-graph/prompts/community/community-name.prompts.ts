@@ -1,4 +1,5 @@
-import { BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
+import type { BaseMessage } from '@langchain/core/messages';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 
 import { NodeNameSchema } from '@/knowledge-graph/types';

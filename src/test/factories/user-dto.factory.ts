@@ -1,6 +1,6 @@
 import { Role } from '@generated/prisma/client';
 
-import { CreateUserDto, DeleteSelfDto, UpdateSelfDto } from '@/user/dto';
+import type { CreateUserDto, DeleteSelfDto, UpdateSelfDto } from '@/user/dto';
 
 export class UserDtoFactory {
   static createCreateUserDto(options: Partial<CreateUserDto> = {}): CreateUserDto {

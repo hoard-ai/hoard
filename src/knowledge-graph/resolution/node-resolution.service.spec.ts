@@ -1,8 +1,10 @@
-import { createMock, DeepMocked } from '@golevelup/ts-jest';
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { Test, TestingModule } from '@nestjs/testing';
+import type { DeepMocked } from '@golevelup/ts-jest';
+import { createMock } from '@golevelup/ts-jest';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { LLM_TRACER, NoOpLlmTracer } from '@/observability';
 import {
   KG_DIFF_EMBEDDING,
@@ -12,7 +14,7 @@ import {
   KgNodeFactory,
 } from '@/test/factories';
 
-import { EntityNode } from '../models';
+import type { EntityNode } from '../models';
 import { EntityNodeRepository } from '../repository/repositories';
 import { NodeResolutionService } from './node-resolution.service';
 

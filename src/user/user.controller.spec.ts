@@ -1,6 +1,8 @@
-import { createMock, DeepMocked } from '@golevelup/ts-jest';
-import { Test, TestingModule } from '@nestjs/testing';
-import { Session as ExpressSession } from 'express-session';
+import type { DeepMocked } from '@golevelup/ts-jest';
+import { createMock } from '@golevelup/ts-jest';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
+import type { Session as ExpressSession } from 'express-session';
 
 import { AuthService } from '@/auth/auth.service';
 import {
@@ -10,13 +12,13 @@ import {
   UserFactory,
 } from '@/test/factories';
 
-import {
+import type {
   GetUserParamsDto,
   GetUsersQueryDto,
   PaginatedUsers,
-  RoleSchema,
   UpdateUserDto,
 } from './dto';
+import { RoleSchema } from './dto';
 import { UserController } from './user.controller';
 import { UserService } from './user.service';
 

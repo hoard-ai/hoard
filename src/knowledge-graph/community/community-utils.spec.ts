@@ -1,11 +1,11 @@
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 import { u } from '@/test/factories';
 
 import {
   type ClusterMatch,
   type ExistingCommunitySnapshot,
 } from '../repository/repositories';
-import { NodeName } from '../types';
+import type { NodeName } from '../types';
 import { findUniqueSuperset, planRoutes, summaryHash } from './community-utils';
 
 function snap(overrides: Partial<ExistingCommunitySnapshot>): ExistingCommunitySnapshot {

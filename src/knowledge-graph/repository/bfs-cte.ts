@@ -1,6 +1,6 @@
 import { Prisma } from '@generated/prisma/client';
 
-import { Uuid } from '@/common/schemas';
+import type { Uuid } from '@/common/schemas';
 
 /**
  * Builds the `WITH RECURSIVE bfs(id, kind, depth, visited) AS (...)` CTE

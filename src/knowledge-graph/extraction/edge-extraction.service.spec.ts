@@ -1,4 +1,4 @@
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { mockDeep } from 'jest-mock-extended';
 import { z } from 'zod';
 
@@ -6,8 +6,8 @@ import { NoOpLlmTracer } from '@/observability';
 import { KG_TEST_GRAPH_ID, KgEdgeFactory, KgNodeFactory } from '@/test/factories';
 
 import type { EdgeTypeMap, EdgeTypeMappings } from '../episode/types';
-import { EntityEdge } from '../models';
-import { EdgeChunkSources } from '../resolution/types';
+import type { EntityEdge } from '../models';
+import type { EdgeChunkSources } from '../resolution/types';
 import { NodeLabelSchema, RelationshipTypeSchema } from '../types';
 import { EdgeExtractionService } from './edge-extraction.service';
 

@@ -1,8 +1,10 @@
-import { createMock, DeepMocked } from '@golevelup/ts-jest';
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { Test, TestingModule } from '@nestjs/testing';
+import type { DeepMocked } from '@golevelup/ts-jest';
+import { createMock } from '@golevelup/ts-jest';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
 
-import { Uuid } from '@/common';
+import type { Uuid } from '@/common';
 import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { LLM_TRACER, NoOpLlmTracer } from '@/observability';
 import {
@@ -15,10 +17,10 @@ import {
   u,
 } from '@/test/factories';
 
-import { EntityEdge } from '../models';
+import type { EntityEdge } from '../models';
 import { EntityEdgeRepository } from '../repository/repositories';
 import { EdgeResolutionService } from './edge-resolution.service';
-import { EdgeChunkSources } from './types';
+import type { EdgeChunkSources } from './types';
 
 // Stable test IDs so intra-batch dedup and endpoint matching reliably fire
 // across edges constructed by `makeEdge` without explicit overrides.

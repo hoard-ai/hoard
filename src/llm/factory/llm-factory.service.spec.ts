@@ -1,6 +1,8 @@
-import { createMock, DeepMocked } from '@golevelup/ts-jest';
+import type { DeepMocked } from '@golevelup/ts-jest';
+import { createMock } from '@golevelup/ts-jest';
 import { BadRequestException } from '@nestjs/common';
-import { Test, TestingModule } from '@nestjs/testing';
+import type { TestingModule } from '@nestjs/testing';
+import { Test } from '@nestjs/testing';
 
 import { LlmConfigService } from '@/config/llm';
 

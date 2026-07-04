@@ -1,6 +1,7 @@
 import { Prisma } from '@generated/prisma/client';
 
-import { SearchFilters, TemporalComparison } from '../search/types';
+import type { SearchFilters } from '../search/types';
+import { TemporalComparison } from '../search/types';
 
 // Postgres equivalents of cypher-filter-builders. Each returns a Prisma.Sql
 // fragment (or empty) ready to be inlined inside a $queryRaw template. The

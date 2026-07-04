@@ -1,9 +1,5 @@
-import {
-  createEntityEdge,
-  createEpisodicEdge,
-  EntityEdge,
-  EpisodicEdge,
-} from '@/knowledge-graph/models';
+import type { EntityEdge, EpisodicEdge } from '@/knowledge-graph/models';
+import { createEntityEdge, createEpisodicEdge } from '@/knowledge-graph/models';
 import { RelationshipTypeSchema } from '@/knowledge-graph/types';
 
 import { KG_REFERENCE_TIME, KG_TEST_GRAPH_ID, kgId } from './kg-constants';
