@@ -4,12 +4,12 @@ import type { Uuid } from '@/common/schemas';
 import { UuidSchema } from '@/common/schemas';
 
 import type {
-  EntityEdge,
-  EntityNode,
-  EpisodicEdge,
-  EpisodicNode,
-  Saga,
-} from '../../models';
+  CommittedCorefBinding,
+  EntityCorefDescriptor,
+  TrackedUnresolvedReference,
+} from '../../extraction/types';
+import { UnresolvedReferenceSchema } from '../../extraction/types';
+import type { EntityEdge, EntityNode, EpisodicEdge, EpisodicNode } from '../../models';
 import {
   EntityEdgeSchema,
   EntityNodeSchema,
@@ -17,7 +17,6 @@ import {
   EpisodicNodeSchema,
 } from '../../models';
 import type {
-  DedupeEdgesResult,
   EdgeChunkSources,
   EdgeResolutionResult,
   NodeResolutionResult,
@@ -156,6 +155,8 @@ const AddEpisodesOptionsBaseSchema = z.object({
   excludedEntityTypes: z.array(NodeLabelSchema).optional(),
   customInstructions: z.string().optional(),
   updateCommunities: z.boolean().optional(),
+  // Gates the resolution attempt
+  resolveCoreferences: z.boolean().optional(),
 });
 
 export const AddTextEpisodesOptionsSchema = AddEpisodesOptionsBaseSchema.extend({
@@ -191,6 +192,9 @@ export const AddEpisodeResultSchema = z.object({
   invalidatedEdges: z.array(EntityEdgeSchema),
   episodicEdges: z.array(EpisodicEdgeSchema),
   episode: EpisodicNodeSchema,
+  unresolvedReferences: z
+    .array(UnresolvedReferenceSchema)
+    .describe('Referring expressions extraction could not tie to any entity'),
 });
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -228,50 +232,52 @@ export interface PipelineConfig {
   effectiveEdgeTypeMappings?: EdgeTypeMappings;
   excludedEntityTypes?: NodeLabel[];
   customInstructions?: string;
-  updateCommunities?: boolean;
+  resolveCoreferences?: boolean;
 }
 
 /**
  * Per-episode working set. Readonly fields are set in `preparePhase`; the rest
- * are filled in place by the phase that owns them (the embed scatter-back and
- * resolution writes). Collection fields start empty so the struct is fully
- * typed from construction. The episode->saga link rides on `node.sagaId`.
+ * are filled in place by the phase that owns them. Collection fields start
+ * empty so the struct is fully typed from construction. The episode->saga link
+ * rides on `episode.sagaId`.
  */
 export interface EpisodeWorkItem {
-  readonly node: EpisodicNode;
+  readonly episode: EpisodicNode;
   readonly chunks: string[];
   readonly prevEpisodes: EpisodicNode[];
-  readonly sagaId?: Uuid;
 
   // Nodes phase
-  extractedNodes: EntityNode[];
-  chunkIndicesByNodeId: Map<Uuid, Set<number>>;
-  resolution: NodeResolutionResult;
+  chunkIndicesByExtractedId: Map<Uuid, Set<number>>;
+  corefByExtractedId: Map<Uuid, EntityCorefDescriptor>;
+  unresolvedReferences: TrackedUnresolvedReference[];
+  nodeResolution: NodeResolutionResult;
   canonicalNodes: EntityNode[]; // object refs shared with BatchState.canonicalNodes
 
   // Edges phase
-  rawEdges: EntityEdge[];
-  chunkIndicesByEdgeId: Map<Uuid, Set<number>>;
-  edgesFromThisEpisode: EntityEdge[]; // routed back after cross-batch dedup
-  edgeDedupe: DedupeEdgesResult; // dedup output; survivors enriched, then invalidated
+  committedCorefBindings: CommittedCorefBinding[];
+  selfLoopFactsForEnrichment: EntityEdge[]; // extracted self-loops + pairs collapsed by the canonicalization fold
   edgeResolution: EdgeResolutionResult; // reassembled after enrich + invalidate
 
-  // Enrich phase (objects constructed here, persisted in persistPhase)
+  // Persist phase (constructed there; read by result assembly)
   episodicEdges: EpisodicEdge[];
 }
 
 /**
  * Graph-global identity state, written once by its producing phase and read
  * after. These structures span episodes by construction and have no per-item
- * home: `canonicalIdByNodeId` remaps ids across episodes, `nodeRegistry`
- * materialises canonical node objects by id, `chunkSources` recovers an edge's
- * origin episode after the cross-batch merge discarded it.
+ * home: `canonicalIdByNodeId` remaps ids across episodes, `allKnownNodesById`
+ * materialises node objects by id (preexisting candidates + batch-created,
+ * merged-away entries included), `chunkSources` recovers an edge's origin
+ * episode after the cross-batch merge discarded it.
  */
 export interface BatchState {
   canonicalIdByNodeId: Map<Uuid, Uuid>;
-  nodeRegistry: Map<Uuid, EntityNode>;
-  existingNodeIds: Set<Uuid>; // live-graph candidate ids only -> "new node" metric
+  allKnownNodesById: Map<Uuid, EntityNode>;
+  // Ids of nodes whose graph rows predate this batch (all enter via
+  // nodeResolution.preexistingCandidates). Complement within allKnownNodesById =
+  // created this batch. Gates the fold's flip/drop + the "new node" metric.
+  preexistingGraphNodeIds: Set<Uuid>;
   chunkSources: EdgeChunkSources;
   canonicalNodes: EntityNode[]; // authoritative deduped union; same refs as items[].canonicalNodes
-  sagas: Saga[]; // one per distinct sagaId; built in enrich, upserted in persist
+  corefByCanonicalId: Map<Uuid, EntityCorefDescriptor>;
 }

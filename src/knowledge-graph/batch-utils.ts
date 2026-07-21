@@ -1,7 +1,11 @@
 import type { Uuid } from '@/common/schemas';
 import type { EntityEdge } from '@/knowledge-graph/models';
 
-class CountingSemaphore {
+/**
+ * Counting semaphore with a FIFO waiter queue. Share one instance across
+ * `withConcurrency` calls to give them a combined concurrency budget.
+ */
+export class CountingSemaphore {
   private count: number;
   private readonly waiters: Array<() => void> = [];
 
@@ -37,15 +41,19 @@ class CountingSemaphore {
  * once. Each slot is always released in a `finally` block so a rejection never
  * leaks a held permit.
  *
- * @param tasks   Zero-argument factory functions returning Promises.
- * @param limit   Maximum tasks to run concurrently.
- * @returns       Results in the same order as `tasks`.
+ * @param limitOrSemaphore  Maximum tasks to run concurrently, or a shared
+ *                          `CountingSemaphore` so multiple calls draw from one budget.
+ * @param tasks             Zero-argument factory functions returning Promises.
+ * @returns                 Results in the same order as `tasks`.
  */
 export async function withConcurrency<T>(
-  limit: number,
+  limitOrSemaphore: number | CountingSemaphore,
   tasks: (() => Promise<T>)[],
 ): Promise<T[]> {
-  const semaphore = new CountingSemaphore(limit);
+  const semaphore =
+    typeof limitOrSemaphore === 'number'
+      ? new CountingSemaphore(limitOrSemaphore)
+      : limitOrSemaphore;
   return Promise.all(
     tasks.map(async (task) => {
       await semaphore.acquire();
@@ -126,12 +134,12 @@ export function compressIdMap<T extends string = string>(pairs: [T, T][]): Map<T
 }
 
 /**
- * Builds a directed alias → canonical map from (extractedId, canonicalId)
- * pairs returned by node resolution. Uses union-find with path compression so
- * chains of aliases collapse to their ultimate canonical target.
+ * Builds a directed alias → canonical map from (aliasId, canonicalId) pairs.
+ * Uses union-find with path compression so chains of aliases collapse to
+ * their ultimate canonical target.
  */
 export function buildDirectedIdMap<T extends string = string>(
-  pairs: [T, T][],
+  pairs: [aliasId: T, canonicalId: T][],
 ): Map<T, T> {
   const parent = new Map<T, T>();
 
@@ -158,9 +166,9 @@ export function buildDirectedIdMap<T extends string = string>(
 
 /**
  * Remaps edge source/target node IDs through a deduplication map.
- * Returns new edge objects; does not mutate input.
+ * Pure lookup - no LLM resolution. Returns new edge objects; does not mutate input.
  */
-export function resolveEdgePointers(
+export function remapEdgeEndpointsToCanonical(
   edges: EntityEdge[],
   idMap: Map<Uuid, Uuid>,
 ): EntityEdge[] {

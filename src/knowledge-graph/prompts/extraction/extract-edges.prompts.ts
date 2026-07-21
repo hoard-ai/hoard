@@ -4,15 +4,20 @@ import { z } from 'zod';
 
 import { edgeTypeKey } from '@/knowledge-graph/episode/episode-utils';
 import type { EdgeTypeMap, EdgeTypeMappings } from '@/knowledge-graph/episode/types';
+import type { UnresolvedReference } from '@/knowledge-graph/extraction/types';
 import type { EntityNode, EpisodicNode } from '@/knowledge-graph/models';
 import { RelationshipTypeSchema } from '@/knowledge-graph/types';
 import type { Violation } from '@/llm';
 
+import {
+  buildCoreferenceBlock,
+  buildUnresolvedReferencesBlock,
+  type CorefCandidate,
+} from '../coref-utils';
 import { formatCurrentEpisode, formatPreviousEpisodes } from '../text-utils';
 
 // Schema
 
-// TODO: Too much cognitive load for a model
 const ExtractedEdgeSchema = z.object({
   sourceEntityIdx: z
     .int()
@@ -50,6 +55,46 @@ export const ExtractedEdgesSchema = z.object({
 
 export type ExtractedEdgesOutput = z.infer<typeof ExtractedEdgesSchema>;
 
+const UsedCoreferenceSchema = z.object({
+  surfaceForm: z
+    .string()
+    .trim()
+    .min(1)
+    .describe('The pronoun or reference you resolved (e.g. "she", "the doctor").'),
+  entityIdx: z
+    .int()
+    .nonnegative()
+    .describe('The 0-based id from the ENTITIES list you resolved the reference to.'),
+  // NOTE: Hallucination point, risk accepted. The quote is not validated as a
+  // substring of the chunk (whitespace/quote normalization would cause retries).
+  locatingQuote: z
+    .string()
+    .trim()
+    .min(1)
+    .describe(
+      'Shortest quote around the reference, sufficient to locate it in the text.',
+    ),
+  unresolvedReferenceIdx: z
+    .int()
+    .nonnegative()
+    .nullable()
+    .describe(
+      'When the reference you resolved is listed under UNRESOLVED REFERENCES, its ' +
+        'refIdx; otherwise null.',
+    ),
+});
+
+export const ExtractedEdgesWithCorefSchema = ExtractedEdgesSchema.extend({
+  usedCoreferences: z
+    .array(UsedCoreferenceSchema)
+    .describe(
+      'Every reference (pronoun or description) you resolved to an entity while ' +
+        'extracting the facts above. Empty if you resolved none.',
+    ),
+});
+
+export type ExtractedEdgesWithCorefOutput = z.infer<typeof ExtractedEdgesWithCorefSchema>;
+
 // Prompt builder
 
 const SYSTEM_PROMPT = `You are an expert fact extractor. Extract factual relationships (edges)
@@ -58,7 +103,8 @@ between the given ENTITIES from the CURRENT EPISODE.
 Primary goal:
 Extract every clearly stated or unambiguously implied relationship between two DISTINCT entities
 from the ENTITIES list that can be represented as an edge in a knowledge graph, paraphrased from
-the source text with all specific details preserved.
+the source text with all specific details preserved. Concrete facts about a SINGLE entity are part
+of the goal too - capture them as self-loops (rules 2-3) rather than losing them.
 
 Source rules:
 - Only use facts grounded in the CURRENT EPISODE. The CURRENT EPISODE may contain multiple
@@ -71,19 +117,26 @@ EXTRACTION RULES:
 1. Entity Id Validation: 'sourceEntityIdx' and 'targetEntityIdx' MUST be the 'id' value of an entry
 in the ENTITIES list provided in the human message.
    - CRITICAL: Using an id not present in the list will cause the edge to be rejected.
-2. Each fact must involve two DISTINCT entities - 'sourceEntityIdx' and 'targetEntityIdx' NEVER
-refer to the same entity (their ids MUST differ).
+2. Prefer facts between two DISTINCT entities. A self-loop ('sourceEntityIdx' equals
+'targetEntityIdx') is the channel for facts about a single entity: it is folded into that
+entity's profile instead of being stored as a relationship. Reach for it whenever rule 3 finds
+no second entity - NEVER drop a concrete fact for lack of one.
 3. Prefer facts that involve two distinct entities from the ENTITIES list. When a sentence
 describes a specific, concrete detail about a single entity (a brand name, a specific item, a
 physical description, a quantity, a location, a named activity), do NOT drop it. Instead, look for
 a second entity in the ENTITIES list that the detail relates to and form a proper edge (e.g.,
 Entity -> OWNS -> item-entity, Entity -> LIVES_IN -> place-entity,
-Entity -> HAS_ATTRIBUTE -> detail-entity). Only skip the fact when no second entity in the
-ENTITIES list can anchor the detail.
+Entity -> HAS_ATTRIBUTE -> detail-entity). Only when no second entity in the ENTITIES list can
+anchor the detail, emit the fact as a self-loop on that entity (sourceEntityIdx =
+targetEntityIdx) instead of dropping it.
    - BAD: "Alice feels happy" (vague single-entity state with no concrete detail - what is Alice happy about?)
    - GOOD: "Alice feels happy about Bob's promotion" -> Alice -> FEELS_HAPPY_ABOUT -> Bob's promotion
    - GOOD: "Nate plays games on a Gamecube" -> Nate -> PLAYS_GAMES_ON -> Gamecube (when "Gamecube" is in ENTITIES)
    - GOOD: "Alice congratulated Bob" (relationship between two entities), "Alice lives in Paris" (relationship between entity and place)
+   - GOOD (self-loop): "Alice is 34 years old" -> Alice -> HAS_AGE -> Alice (concrete fact, but no
+entity in the list can anchor an age - the self-loop folds it into Alice's profile)
+   - GOOD (self-loop): "Nate, an Argentine engineer" -> Nate -> HAS_NATIONALITY -> Nate (when no
+Argentina entity exists in the list)
 4. Do not emit semantically redundant facts, even across episodes within the CURRENT EPISODE.
 However, if a later episode adds specific details to a previously stated fact (e.g., adding a brand
 name, a count, a color, a location, or any concrete attribute), extract the more detailed version
@@ -126,6 +179,8 @@ export function buildExtractEdgesMessages(ctx: {
   customInstructions?: string;
   edgeTypes?: EdgeTypeMap;
   edgeTypeMappings?: EdgeTypeMappings;
+  coreferences?: CorefCandidate[];
+  unresolvedReferences?: ReadonlyArray<UnresolvedReference>;
 }): BaseMessage[] {
   const {
     episode,
@@ -134,6 +189,8 @@ export function buildExtractEdgesMessages(ctx: {
     customInstructions,
     edgeTypes,
     edgeTypeMappings,
+    coreferences,
+    unresolvedReferences,
   } = ctx;
 
   const edgeTypeSignaturesMap: Record<string, string[]> = {};
@@ -176,6 +233,24 @@ ${JSON.stringify(edgeTypesContext, null, 2)}
 </FACT TYPES>`;
   }
 
+  const corefBlock = coreferences?.length
+    ? buildCoreferenceBlock({ candidates: coreferences })
+    : null;
+  const unresolvedBlock = unresolvedReferences?.length
+    ? buildUnresolvedReferencesBlock(unresolvedReferences)
+    : null;
+  if (corefBlock || unresolvedBlock) {
+    if (corefBlock) humanContent += `\n\n${corefBlock}`;
+    if (unresolvedBlock) humanContent += `\n\n${unresolvedBlock}`;
+    humanContent +=
+      '\n\nWhen a fact refers to an entity by a pronoun or description, use ' +
+      'that entity (by its ENTITIES id) as the source or target and record ' +
+      'the resolution in usedCoreferences: surfaceForm, entityIdx, the shortest ' +
+      'quote around the reference as locatingQuote, and unresolvedReferenceIdx ' +
+      '(the unresolvedReferenceIdx of the matching UNRESOLVED REFERENCES entry when the reference ' +
+      'is listed there, otherwise null).';
+  }
+
   if (customInstructions) {
     humanContent += `\n\n<CUSTOM INSTRUCTIONS>\n${customInstructions}\n</CUSTOM INSTRUCTIONS>`;
   }
@@ -185,8 +260,10 @@ ${JSON.stringify(edgeTypesContext, null, 2)}
 
 export function buildExtractEdgesValidator(ctx: {
   nodes: ReadonlyArray<unknown>;
-}): (parsed: ExtractedEdgesOutput) => Violation[] {
+  unresolvedReferences?: ReadonlyArray<UnresolvedReference>;
+}): (parsed: ExtractedEdgesOutput | ExtractedEdgesWithCorefOutput) => Violation[] {
   const nodeCount = ctx.nodes.length;
+  const unresolvedReferences = ctx.unresolvedReferences ?? [];
 
   return (parsed) => {
     const violations: Violation[] = [];
@@ -203,12 +280,25 @@ export function buildExtractEdgesValidator(ctx: {
           message: `targetEntityIdx ${e.targetEntityIdx} is out of range (ENTITIES has ${nodeCount})`,
         });
       }
-      if (e.sourceEntityIdx === e.targetEntityIdx) {
-        violations.push({
-          code: 'edge.self-loop',
-          message: `self-loop: sourceEntityIdx and targetEntityIdx both refer to id ${e.sourceEntityIdx}`,
-        });
-      }
+      // Self-loops are accepted: single-entity facts fold into the node's
+      // enrichment context at the edgesPhase remap, never persisting as edges.
+    }
+    if ('usedCoreferences' in parsed) {
+      const refCount = unresolvedReferences.length;
+      parsed.usedCoreferences.forEach((u, i) => {
+        if (u.entityIdx >= nodeCount) {
+          violations.push({
+            code: 'edge.coref-idx-out-of-range',
+            message: `usedCoreferences entityIdx ${u.entityIdx} is out of range (ENTITIES has ${nodeCount})`,
+          });
+        }
+        if (u.unresolvedReferenceIdx !== null && u.unresolvedReferenceIdx >= refCount) {
+          violations.push({
+            code: 'edge.coref-unresolved-idx-out-of-range',
+            message: `usedCoreferences[${i}] unresolvedReferenceIdx ${u.unresolvedReferenceIdx} is out of range (UNRESOLVED REFERENCES has ${refCount})`,
+          });
+        }
+      });
     }
     return violations;
   };

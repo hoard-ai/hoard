@@ -10,7 +10,7 @@ export enum EpisodeType {
 
 export const EpisodeTypeSchema = z.enum(EpisodeType);
 
-export const NodeNameSchema = z.string().min(1).brand<'NodeName'>();
+export const NodeNameSchema = z.string().trim().min(1).brand<'NodeName'>();
 
 export const NodeLabelSchema = z
   .string()

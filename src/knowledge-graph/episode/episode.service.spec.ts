@@ -40,15 +40,18 @@ import { EpisodeService } from './episode.service';
 const nodesResult = (nodes: EntityNode[]) => ({
   nodes,
   // Each extracted node carries originating chunk indices (single-chunk episode here).
-  chunkIndicesByNodeId: new Map<Uuid, Set<number>>(
+  chunkIndicesByExtractedId: new Map<Uuid, Set<number>>(
     nodes.map((n) => [n.id, new Set([0])]),
   ),
+  corefByExtractedId: new Map(),
+  unresolvedReferences: [],
 });
 const edgesResult = (edges: EntityEdge[]) => ({
   edges,
   chunkIndicesByEdgeId: new Map<Uuid, Set<number>>(
     edges.map((e) => [e.id, new Set([0])]),
   ),
+  committedCorefBindings: [],
 });
 
 describe('EpisodeService', () => {
@@ -118,24 +121,24 @@ describe('EpisodeService', () => {
     mockNodeExtraction.fillEntityAttributes.mockResolvedValue(undefined);
     mockNodeExtraction.summarizeNodes.mockResolvedValue(undefined);
     mockNodeResolution.resolveNodes.mockResolvedValue({
-      resolvedNodes: [],
-      idMap: new Map(),
-      duplicatePairs: [],
-      candidates: [],
+      newNodes: [],
+      nodesMatchedToPreexistingNodes: [],
+      preexistingCandidates: [],
     });
     mockNodeResolution.dedupeAcrossBatch.mockReturnValue([]);
+    mockNodeResolution.canonicalizeEpisodeNodes.mockResolvedValue([]);
     mockEmbeddingService.embedNodes.mockResolvedValue([]);
     mockEdgeExtraction.extractEdges.mockResolvedValue(edgesResult([]));
     mockEdgeExtraction.enrichEdges.mockResolvedValue(undefined);
     mockEmbeddingService.embedEdges.mockResolvedValue([]);
     mockEdgeResolution.dedupeEdges.mockResolvedValue({
-      matchedExistingEdges: [],
-      survivors: [],
-      contradictionsBySurvivorId: new Map(),
+      matchedPreexistingEdges: [],
+      newEdges: [],
+      contradictionsByNewEdgeId: new Map(),
     });
     mockEdgeResolution.invalidateEdges.mockReturnValue({
       invalidatedEdges: [],
-      invalidatedBySurvivorId: new Map(),
+      invalidatedByNewEdgeId: new Map(),
     });
     // Default passthrough: dedup returns the flat distinct edge set (no merges).
     // Tests asserting cross-batch dedup behavior override this.
@@ -221,11 +224,11 @@ describe('EpisodeService', () => {
       );
     });
 
-    it('extracts edges with canonical nodes (resolved + matched existing)', async () => {
+    it('extracts edges with canonical nodes (resolved + matched preexisting)', async () => {
       const resolved = KgNodeFactory.createEntityNode({ name: 'Alice' });
-      const existing = {
+      const preexisting = {
         ...KgNodeFactory.createEntityNode({ name: 'Bob' }),
-        id: u('existing-bob-id'),
+        id: u('preexisting-bob-id'),
       };
       const alias = KgNodeFactory.createEntityNode({ name: 'Robert' });
 
@@ -235,10 +238,11 @@ describe('EpisodeService', () => {
         { ...alias, nameEmbedding: null },
       ]);
       mockNodeResolution.resolveNodes.mockResolvedValue({
-        resolvedNodes: [resolved],
-        idMap: new Map([[alias.id, existing.id]]),
-        duplicatePairs: [{ extractedId: alias.id, canonicalId: existing.id }],
-        candidates: [existing],
+        newNodes: [resolved],
+        nodesMatchedToPreexistingNodes: [
+          { extractedId: alias.id, preexistingNodeId: preexisting.id },
+        ],
+        preexistingCandidates: [preexisting],
       });
 
       await service.addTextEpisodes({
@@ -250,11 +254,14 @@ describe('EpisodeService', () => {
         mockModel,
         expect.anything(),
         expect.any(Array),
-        expect.arrayContaining([resolved, existing]),
+        expect.arrayContaining([resolved, preexisting]),
         [],
         undefined,
         undefined,
         undefined,
+        false, // resolveCoreferences
+        expect.any(Array), // corefCandidates
+        expect.any(Array), // unresolvedReferences
         expect.anything(),
       );
     });
@@ -316,7 +323,7 @@ describe('EpisodeService', () => {
       );
     });
 
-    it('pools survivors from dedupe into enrichEdges, then invalidates them', async () => {
+    it('pools newEdges from dedupe into enrichEdges, then invalidates them', async () => {
       const edge = KgEdgeFactory.createEntityEdge({
         name: 'WORKS_AT',
         sourceNodeId: u('src'),
@@ -328,9 +335,9 @@ describe('EpisodeService', () => {
       mockEdgeExtraction.extractEdges.mockResolvedValue(edgesResult([edge]));
       mockEmbeddingService.embedEdges.mockResolvedValue([embeddedEdge]);
       mockEdgeResolution.dedupeEdges.mockResolvedValue({
-        matchedExistingEdges: [],
-        survivors: [embeddedEdge],
-        contradictionsBySurvivorId: new Map(),
+        matchedPreexistingEdges: [],
+        newEdges: [embeddedEdge],
+        contradictionsByNewEdgeId: new Map(),
       });
 
       await service.addTextEpisodes({
@@ -347,6 +354,7 @@ describe('EpisodeService', () => {
         expect.any(Map), // chunkSources
         undefined,
         undefined,
+        expect.any(Array), // committedCorefBindingsPerEpisode
         expect.anything(),
       );
       expect(mockEdgeResolution.invalidateEdges).toHaveBeenCalledWith(
@@ -368,13 +376,57 @@ describe('EpisodeService', () => {
         expect(entry.edges).toBeInstanceOf(Array);
         expect(entry.invalidatedEdges).toBeInstanceOf(Array);
         expect(entry.episodicEdges).toBeInstanceOf(Array);
+        expect(entry.unresolvedReferences).toBeInstanceOf(Array);
       });
+    });
+
+    it('drops only the claimed reference when two share a surface form', async () => {
+      // Two distinct "she" occurrences; an edge extraction resolves only one.
+      const sheKept = {
+        id: u('she-kept'),
+        surfaceForm: 'she',
+        locatingQuote: 'she made the first dive',
+        sourceChunkIndex: 0,
+      };
+      const sheClaimed = {
+        id: u('she-claimed'),
+        surfaceForm: 'she',
+        locatingQuote: 'she named the largest colony',
+        sourceChunkIndex: 0,
+      };
+      mockNodeExtraction.extractNodes.mockResolvedValue({
+        ...nodesResult([]),
+        unresolvedReferences: [sheKept, sheClaimed],
+      });
+      mockEdgeExtraction.extractEdges.mockResolvedValue({
+        ...edgesResult([]),
+        committedCorefBindings: [
+          {
+            surfaceForm: 'she',
+            boundNodeId: u('marquez'),
+            sourceChunkIndex: 0,
+            locatingQuote: 'she named the largest',
+            resolvedUnresolvedReferenceId: sheClaimed.id,
+          },
+        ],
+      });
+
+      const [result] = await service.addTextEpisodes({
+        userId: KG_TEST_USER_ID,
+        episodes: [makeEpisode('ep1')],
+      });
+
+      // A surface-form join would clobber BOTH "she"s; the id join drops only the
+      // claimed occurrence and strips the survivor's internal id/chunk.
+      expect(result.unresolvedReferences).toEqual([
+        { surfaceForm: 'she', locatingQuote: 'she made the first dive' },
+      ]);
     });
 
     it('builds one episodic edge per canonical node referenced by each episode', async () => {
       const resolved = KgNodeFactory.createEntityNode({ name: 'Alice' });
       const alias = KgNodeFactory.createEntityNode({ name: 'Bobby' });
-      const existing = {
+      const preexisting = {
         ...KgNodeFactory.createEntityNode({ name: 'Bob' }),
         id: u('bob-id'),
       };
@@ -385,10 +437,11 @@ describe('EpisodeService', () => {
         { ...alias, nameEmbedding: null },
       ]);
       mockNodeResolution.resolveNodes.mockResolvedValue({
-        resolvedNodes: [resolved],
-        idMap: new Map([[alias.id, existing.id]]),
-        duplicatePairs: [{ extractedId: alias.id, canonicalId: existing.id }],
-        candidates: [existing],
+        newNodes: [resolved],
+        nodesMatchedToPreexistingNodes: [
+          { extractedId: alias.id, preexistingNodeId: preexisting.id },
+        ],
+        preexistingCandidates: [preexisting],
       });
 
       const [entry] = await service.addTextEpisodes({
@@ -398,7 +451,7 @@ describe('EpisodeService', () => {
 
       expect(entry.episodicEdges).toHaveLength(2);
       expect(entry.episodicEdges.map((e) => e.targetNodeId)).toEqual(
-        expect.arrayContaining([resolved.id, existing.id]),
+        expect.arrayContaining([resolved.id, preexisting.id]),
       );
     });
   });
@@ -422,16 +475,16 @@ describe('EpisodeService', () => {
       mockEmbeddingService.embedNodes.mockResolvedValue([canonical, alias]);
       mockNodeResolution.resolveNodes
         .mockResolvedValueOnce({
-          resolvedNodes: [canonical],
-          idMap: new Map([[canonical.id, canonical.id]]),
-          duplicatePairs: [],
-          candidates: [],
+          newNodes: [canonical],
+          nodesMatchedToPreexistingNodes: [],
+          preexistingCandidates: [],
         })
         .mockResolvedValueOnce({
-          resolvedNodes: [],
-          duplicatePairs: [{ extractedId: alias.id, canonicalId: canonical.id }],
-          idMap: new Map([[alias.id, canonical.id]]),
-          candidates: [],
+          newNodes: [],
+          nodesMatchedToPreexistingNodes: [
+            { extractedId: alias.id, preexistingNodeId: canonical.id },
+          ],
+          preexistingCandidates: [],
         });
 
       const result = await service.addTextEpisodes({
@@ -444,8 +497,8 @@ describe('EpisodeService', () => {
       expect(allNodes.find((n) => n.id === canonical.id)).toBeDefined();
     });
 
-    it('existing node referenced as canonical target is pulled into the matching episode entry', async () => {
-      const existingCanonical = KgNodeFactory.createEntityNode({
+    it('preexisting node referenced as canonical target is pulled into the matching episode entry', async () => {
+      const preexistingCanonical = KgNodeFactory.createEntityNode({
         name: 'Alice',
         graphId: KG_TEST_GRAPH_ID,
       });
@@ -457,10 +510,11 @@ describe('EpisodeService', () => {
       mockNodeExtraction.extractNodes.mockResolvedValue(nodesResult([alias]));
       mockEmbeddingService.embedNodes.mockResolvedValue([alias]);
       mockNodeResolution.resolveNodes.mockResolvedValue({
-        resolvedNodes: [],
-        duplicatePairs: [{ extractedId: alias.id, canonicalId: existingCanonical.id }],
-        idMap: new Map([[alias.id, existingCanonical.id]]),
-        candidates: [existingCanonical],
+        newNodes: [],
+        nodesMatchedToPreexistingNodes: [
+          { extractedId: alias.id, preexistingNodeId: preexistingCanonical.id },
+        ],
+        preexistingCandidates: [preexistingCanonical],
       });
 
       const [entry] = await service.addTextEpisodes({
@@ -468,7 +522,7 @@ describe('EpisodeService', () => {
         episodes: [makeEpisode('ep1')],
       });
 
-      expect(entry.nodes.find((n) => n.id === existingCanonical.id)).toBeDefined();
+      expect(entry.nodes.find((n) => n.id === preexistingCanonical.id)).toBeDefined();
       expect(entry.nodes.find((n) => n.id === alias.id)).toBeUndefined();
     });
 
@@ -488,16 +542,16 @@ describe('EpisodeService', () => {
       mockEmbeddingService.embedNodes.mockResolvedValue([canonical, alias]);
       mockNodeResolution.resolveNodes
         .mockResolvedValueOnce({
-          resolvedNodes: [canonical],
-          idMap: new Map([[canonical.id, canonical.id]]),
-          duplicatePairs: [],
-          candidates: [],
+          newNodes: [canonical],
+          nodesMatchedToPreexistingNodes: [],
+          preexistingCandidates: [],
         })
         .mockResolvedValueOnce({
-          resolvedNodes: [canonical],
-          duplicatePairs: [{ extractedId: alias.id, canonicalId: canonical.id }],
-          idMap: new Map([[alias.id, canonical.id]]),
-          candidates: [],
+          newNodes: [canonical],
+          nodesMatchedToPreexistingNodes: [
+            { extractedId: alias.id, preexistingNodeId: canonical.id },
+          ],
+          preexistingCandidates: [],
         });
 
       await service.addTextEpisodes({
@@ -512,9 +566,10 @@ describe('EpisodeService', () => {
 
   // ─── Pass-2: within-batch dedup is delegated to NodeResolutionService ──────
   // Logic-level unit tests for the dedup itself live in
-  // node-resolution.service.spec.ts ('dedupeAcrossBatch'). The orchestration
-  // test below verifies that pairs returned by the service participate in the
-  // final canonical projection.
+  // node-resolution.service.spec.ts ('dedupeAcrossBatch'); the canonical
+  // projection helpers (recompute*) are unit-tested in episode-utils.spec.ts.
+  // The orchestration test below verifies that pairs returned by the service
+  // participate in the final canonical projection.
 
   describe('addEpisodes - pass-2 dedup (orchestration)', () => {
     it('pairs returned by dedupeAcrossBatch are folded into canonicalIdByNodeId, collapsing the alias', async () => {
@@ -533,16 +588,14 @@ describe('EpisodeService', () => {
       mockEmbeddingService.embedNodes.mockResolvedValue([canonical, alias]);
       mockNodeResolution.resolveNodes
         .mockResolvedValueOnce({
-          resolvedNodes: [canonical],
-          idMap: new Map([[canonical.id, canonical.id]]),
-          duplicatePairs: [],
-          candidates: [],
+          newNodes: [canonical],
+          nodesMatchedToPreexistingNodes: [],
+          preexistingCandidates: [],
         })
         .mockResolvedValueOnce({
-          resolvedNodes: [alias],
-          idMap: new Map([[alias.id, alias.id]]),
-          duplicatePairs: [],
-          candidates: [],
+          newNodes: [alias],
+          nodesMatchedToPreexistingNodes: [],
+          preexistingCandidates: [],
         });
       mockNodeResolution.dedupeAcrossBatch.mockReturnValue([[alias.id, canonical.id]]);
 
@@ -554,6 +607,177 @@ describe('EpisodeService', () => {
       const allNodes = result.flatMap((r) => r.nodes);
       expect(allNodes.find((n) => n.id === canonical.id)).toBeDefined();
       expect(allNodes.find((n) => n.id === alias.id)).toBeUndefined();
+    });
+  });
+
+  // ─── Within-episode canonicalization (phantom-node fold) ───────────────────
+
+  describe('addEpisodes - within-episode canonicalization', () => {
+    // Long enough to clear CHUNK_MAX_TOKENS so prepareChunks splits it - the
+    // canonicalization pass only runs for multi-chunk episodes.
+    const longEpisode = (name: string) => ({
+      ...makeEpisode(name),
+      content: 'This is a filler sentence about nothing in particular. '.repeat(200),
+    });
+
+    it('skips the canonicalization call for single-chunk episodes', async () => {
+      await service.addTextEpisodes({
+        userId: KG_TEST_USER_ID,
+        episodes: [makeEpisode('ep1')],
+      });
+
+      expect(mockNodeResolution.canonicalizeEpisodeNodes).not.toHaveBeenCalled();
+    });
+
+    it('folds returned pairs: the merged-away node vanishes and its edges are remapped', async () => {
+      const named = KgNodeFactory.createEntityNode({ name: 'Dr. Elena Marquez' });
+      const phantom = KgNodeFactory.createEntityNode({ name: 'biologist' });
+      const place = KgNodeFactory.createEntityNode({ name: 'Valparaiso' });
+
+      mockNodeExtraction.extractNodes.mockResolvedValue(
+        nodesResult([named, phantom, place]),
+      );
+      mockEmbeddingService.embedNodes.mockResolvedValue([named, phantom, place]);
+      mockNodeResolution.resolveNodes.mockResolvedValue({
+        newNodes: [named, phantom, place],
+        nodesMatchedToPreexistingNodes: [],
+        preexistingCandidates: [],
+      });
+      mockNodeResolution.canonicalizeEpisodeNodes.mockResolvedValue([
+        [phantom.id, named.id],
+      ]);
+      const edge = KgEdgeFactory.createEntityEdge({
+        name: 'WORKS_AT',
+        sourceNodeId: phantom.id,
+        targetNodeId: place.id,
+        fact: 'The biologist works in Valparaiso',
+      });
+      mockEdgeExtraction.extractEdges.mockResolvedValue(edgesResult([edge]));
+      mockEmbeddingService.embedEdges.mockImplementation((edges) =>
+        Promise.resolve(edges),
+      );
+
+      const [entry] = await service.addTextEpisodes({
+        userId: KG_TEST_USER_ID,
+        episodes: [longEpisode('ep1')],
+      });
+
+      expect(mockNodeResolution.canonicalizeEpisodeNodes).toHaveBeenCalledTimes(1);
+      expect(entry.nodes.map((n) => n.id)).toEqual(
+        expect.arrayContaining([named.id, place.id]),
+      );
+      expect(entry.nodes.find((n) => n.id === phantom.id)).toBeUndefined();
+
+      const [embedded] = mockEmbeddingService.embedEdges.mock.calls[0];
+      expect(embedded).toHaveLength(1);
+      expect(embedded[0].sourceNodeId).toBe(named.id);
+    });
+
+    it('pulls post-remap self-loops out of the edge pipeline into summary fact context', async () => {
+      const named = KgNodeFactory.createEntityNode({ name: 'Dr. Elena Marquez' });
+      const phantom = KgNodeFactory.createEntityNode({ name: 'biologist' });
+
+      mockNodeExtraction.extractNodes.mockResolvedValue(nodesResult([named, phantom]));
+      mockEmbeddingService.embedNodes.mockResolvedValue([named, phantom]);
+      mockNodeResolution.resolveNodes.mockResolvedValue({
+        newNodes: [named, phantom],
+        nodesMatchedToPreexistingNodes: [],
+        preexistingCandidates: [],
+      });
+      mockNodeResolution.canonicalizeEpisodeNodes.mockResolvedValue([
+        [phantom.id, named.id],
+      ]);
+      const selfLoop = KgEdgeFactory.createEntityEdge({
+        name: 'HAS_ROLE',
+        sourceNodeId: named.id,
+        targetNodeId: phantom.id,
+        fact: 'Elena is the expedition biologist',
+      });
+      mockEdgeExtraction.extractEdges.mockResolvedValue(edgesResult([selfLoop]));
+      mockEmbeddingService.embedEdges.mockImplementation((edges) =>
+        Promise.resolve(edges),
+      );
+
+      await service.addTextEpisodes({
+        userId: KG_TEST_USER_ID,
+        episodes: [longEpisode('ep1')],
+      });
+
+      // The collapsed edge never reaches embedding/dedup/persist...
+      expect(mockEmbeddingService.embedEdges).toHaveBeenCalledWith([]);
+      const savedEdges = mockEntityEdgeRepo.saveBulk.mock.calls.flatMap(
+        ([edges]) => edges,
+      );
+      expect(savedEdges.find((e) => e.id === selfLoop.id)).toBeUndefined();
+
+      // ...but its fact feeds the node summary context.
+      const summaryFacts = mockNodeExtraction.summarizeNodes.mock.calls[0][2];
+      expect(summaryFacts).toEqual([
+        expect.objectContaining({ fact: 'Elena is the expedition biologist' }),
+      ]);
+    });
+
+    it('flips a pair whose merged-away node is live: the live id survives under the new name', async () => {
+      const newNode = KgNodeFactory.createEntityNode({ name: 'Dr. Elena Marquez' });
+      const phantomExtracted = KgNodeFactory.createEntityNode({ name: 'biologist' });
+      const liveNode = KgNodeFactory.createEntityNode({ name: 'biologist' });
+
+      mockNodeExtraction.extractNodes.mockResolvedValue(
+        nodesResult([newNode, phantomExtracted]),
+      );
+      mockEmbeddingService.embedNodes.mockResolvedValue([newNode, phantomExtracted]);
+      mockNodeResolution.resolveNodes.mockResolvedValue({
+        newNodes: [newNode],
+        nodesMatchedToPreexistingNodes: [
+          { extractedId: phantomExtracted.id, preexistingNodeId: liveNode.id },
+        ],
+        preexistingCandidates: [liveNode],
+      });
+      mockNodeResolution.canonicalizeEpisodeNodes.mockResolvedValue([
+        [liveNode.id, newNode.id],
+      ]);
+
+      const [entry] = await service.addTextEpisodes({
+        userId: KG_TEST_USER_ID,
+        episodes: [longEpisode('ep1')],
+      });
+
+      expect(entry.nodes).toHaveLength(1);
+      expect(entry.nodes[0]).toEqual(
+        expect.objectContaining({ id: liveNode.id, name: 'Dr. Elena Marquez' }),
+      );
+      expect(entry.nodes.find((n) => n.id === newNode.id)).toBeUndefined();
+    });
+
+    it('drops a pair between two live nodes and keeps both', async () => {
+      const p1 = KgNodeFactory.createEntityNode({ name: 'the captain' });
+      const p2 = KgNodeFactory.createEntityNode({ name: 'Captain Ruiz' });
+      const live1 = KgNodeFactory.createEntityNode({ name: 'the captain' });
+      const live2 = KgNodeFactory.createEntityNode({ name: 'Captain Ruiz' });
+
+      mockNodeExtraction.extractNodes.mockResolvedValue(nodesResult([p1, p2]));
+      mockEmbeddingService.embedNodes.mockResolvedValue([p1, p2]);
+      mockNodeResolution.resolveNodes.mockResolvedValue({
+        newNodes: [],
+        nodesMatchedToPreexistingNodes: [
+          { extractedId: p1.id, preexistingNodeId: live1.id },
+          { extractedId: p2.id, preexistingNodeId: live2.id },
+        ],
+        preexistingCandidates: [live1, live2],
+      });
+      mockNodeResolution.canonicalizeEpisodeNodes.mockResolvedValue([
+        [live1.id, live2.id],
+      ]);
+
+      const [entry] = await service.addTextEpisodes({
+        userId: KG_TEST_USER_ID,
+        episodes: [longEpisode('ep1')],
+      });
+
+      expect(entry.nodes.map((n) => n.id).sort()).toEqual([live1.id, live2.id].sort());
+      expect(entry.nodes.map((n) => n.name).sort()).toEqual(
+        ['Captain Ruiz', 'the captain'].sort(),
+      );
     });
   });
 
@@ -629,7 +853,7 @@ describe('EpisodeService', () => {
     });
 
     it('does not schedule when updateCommunities is true but no entities resolved', async () => {
-      // Default resolveNodes mock returns empty resolvedNodes - no entities to
+      // Default resolveNodes mock returns empty newNodes - no entities to
       // update. The call site skips the call.
       await service.addTextEpisodes({
         userId: KG_TEST_USER_ID,
@@ -647,10 +871,9 @@ describe('EpisodeService', () => {
         { ...resolved, nameEmbedding: [1, 0, 0] },
       ]);
       mockNodeResolution.resolveNodes.mockResolvedValue({
-        resolvedNodes: [resolved],
-        idMap: new Map(),
-        duplicatePairs: [],
-        candidates: [],
+        newNodes: [resolved],
+        nodesMatchedToPreexistingNodes: [],
+        preexistingCandidates: [],
       });
 
       await service.addTextEpisodes({
@@ -689,16 +912,14 @@ describe('EpisodeService', () => {
       ]);
       mockNodeResolution.resolveNodes
         .mockResolvedValueOnce({
-          resolvedNodes: [resolvedA],
-          idMap: new Map(),
-          duplicatePairs: [],
-          candidates: [],
+          newNodes: [resolvedA],
+          nodesMatchedToPreexistingNodes: [],
+          preexistingCandidates: [],
         })
         .mockResolvedValueOnce({
-          resolvedNodes: [resolvedB],
-          idMap: new Map(),
-          duplicatePairs: [],
-          candidates: [],
+          newNodes: [resolvedB],
+          nodesMatchedToPreexistingNodes: [],
+          preexistingCandidates: [],
         });
 
       await service.addTextEpisodes({
@@ -718,6 +939,49 @@ describe('EpisodeService', () => {
         otherGraphId,
         [resolvedB.id],
       );
+    });
+  });
+
+  // ─── Episode deletion ─────────────────────────────────────────────────────
+
+  describe('deleteEpisode', () => {
+    it('schedules community maintenance for the mentioned entities after deletion', async () => {
+      const episode = KgNodeFactory.createEpisodicNode();
+      const mentionedIds = [u('mention-1'), u('mention-2')];
+      mockEpisodicNodeRepo.getById.mockResolvedValue(episode);
+      mockEpisodicNodeRepo.getMentionedEntityIds.mockResolvedValue(mentionedIds);
+      mockEntityEdgeRepo.getIdsForEpisodeDeletion.mockResolvedValue([]);
+
+      await service.deleteEpisode(KG_TEST_USER_ID, episode.id);
+
+      const deleteOrder = mockEpisodicNodeRepo.delete.mock.invocationCallOrder[0];
+      const scheduleOrder =
+        mockCommunityMaintenance.scheduleMaintenance.mock.invocationCallOrder[0];
+      expect(deleteOrder).toBeLessThan(scheduleOrder);
+      expect(mockCommunityMaintenance.scheduleMaintenance).toHaveBeenCalledWith(
+        KG_TEST_USER_ID,
+        episode.graphId,
+        mentionedIds,
+      );
+    });
+
+    it('does not schedule maintenance when the episode mentions no entities', async () => {
+      const episode = KgNodeFactory.createEpisodicNode();
+      mockEpisodicNodeRepo.getById.mockResolvedValue(episode);
+      mockEpisodicNodeRepo.getMentionedEntityIds.mockResolvedValue([]);
+      mockEntityEdgeRepo.getIdsForEpisodeDeletion.mockResolvedValue([]);
+
+      await service.deleteEpisode(KG_TEST_USER_ID, episode.id);
+
+      expect(mockCommunityMaintenance.scheduleMaintenance).not.toHaveBeenCalled();
+    });
+
+    it('does not schedule maintenance when the episode does not exist', async () => {
+      mockEpisodicNodeRepo.getById.mockResolvedValue(null);
+
+      await service.deleteEpisode(KG_TEST_USER_ID, u('missing-episode'));
+
+      expect(mockCommunityMaintenance.scheduleMaintenance).not.toHaveBeenCalled();
     });
   });
 });

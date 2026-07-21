@@ -5,7 +5,7 @@ import { isSentenceEnd } from '../prompts/text-utils';
 // Density-based chunking: only chunk high-density content (many entities per token)
 // This targets the failure case (large entity-dense inputs) while preserving
 // context for prose/narrative content
-export const CHUNK_TOKEN_SIZE = 3000;
+export const CHUNK_TOKEN_SIZE = 1000;
 export const CHUNK_OVERLAP_TOKENS = 200;
 // Minimum tokens before considering chunking - short content processes fine regardless of density
 export const CHUNK_MIN_TOKENS = 1000;
@@ -19,7 +19,7 @@ export const CHUNK_DENSITY_THRESHOLD = 0.15;
 // Hard upper bound: content at/above this many tokens is ALWAYS chunked, regardless
 // of density. Diverges from Graphiti (which has no ceiling, so large low-density
 // prose is never split and floods extraction). Tune against the eval set.
-export const CHUNK_MAX_TOKENS = 6000;
+export const CHUNK_MAX_TOKENS = 2000;
 
 // Approximate characters per token (conservative estimate).
 const CHARS_PER_TOKEN = 4;

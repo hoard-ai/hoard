@@ -4,10 +4,6 @@ Hoard is an automatically managed, graph-enabled, time-aware knowledge bank:
 a provider-agnostic memory layer that any AI agent can plug into. RememberNow
 is one consumer of Hoard.
 
-The point is to allow users (or agents) to dump any amount of information into
-Hoard, and it will embed it into the graph, reminding people of things when
-necessary (e.g. appointments).
-
 This is a GraphRAG application, the core of which is in `src/knowledge-graph`.
 
 It is a modified and improved TypeScript port of Graphiti by Zep, which is written in Python originally.
@@ -15,6 +11,20 @@ It is a modified and improved TypeScript port of Graphiti by Zep, which is writt
 The original Graphiti codebase can only be accessed if the
 user cloned the repository. Check existence with `ls graphiti/`
 if you deem referencing necessary.
+
+The point is to allow users (or agents) to dump any amount of information into
+Hoard, and it will embed it into the graph. The graph will act analogously to human memory,
+so keeping the graph consistent across entity nodes is important, as it will
+act as the authoritative source of information for an agent's next action. It will
+be available as an MCP server, REST API and TS client.
+
+Eventually, the point is to make the graph omni-modal - any information can be stored inside,
+such as PDF files, mp3 files and more. Files will get stored as both a node in the graph,
+and in s3 if the agent ever decides to retrieve that file specifically. Information that
+was gathered from file contents is stored on the entity node.
+
+The end result is something you yourself can use as a persistent memory store,
+which can represent information in a higher fidelity than plaintext files.
 
 Tech stack:
 NestJS 11
@@ -56,22 +66,35 @@ Never pipe `npm run lint` into something like `tail` or `grep` because the lint
 takes 22 seconds to run, so you're wasting time. The output isn't that big.
 Same for `npm test`.
 
-Use `npm run prisma:generate` instead of `npx prisma generate `since it automatically uses dotenv to load the proper .env file when calling prisma. Same for other prisma commands.
+Use `npm run prisma:generate` instead of `npx prisma generate `since it automatically uses dotenv to
+load the proper .env file when calling prisma. Same for other prisma commands.
 
 ## Conventions
 
-- In the knowledge-graph module, DB access lives only in `src/knowledge-graph/repository/repositories`; its services/helpers consume repo methods, never Prisma directly. (This is a KG-module rule, not a top-level API rule.)
+- In the knowledge-graph module, DB access lives only in `src/knowledge-graph/repository/repositories`;
+  its services/helpers consume repo methods, never Prisma directly. (This is a KG-module rule, not a top-level API rule.)
 - Module types go in `src/<module>/types/<module>.types.ts` with a `types/index.ts` barrel.
+- A data shape shared by different parts of code (a result DTO, a service), in general is defined ONCE as a
+  Zod schema in the module's `types/` file (with validation, e.g. `.min(1)`), its TS type inferred from it;
+  other consumers import that schema. Sometimes you redefine types when it is unnecessary and that creates parallel maintenance debt.
 - Never swallow exceptions — throw or log.
-- A value that should always be present but is typed optional (`?:` / `| undefined`) is debt — make required things required, and throw on a missing value rather than silently defaulting when the type is shared with a path that legitimately lacks it.
+- A value that should always be present but is typed optional (`?:` / `| undefined`) is debt — make required things required,
+  and throw on a missing value rather than silently defaulting when the type is shared with a path that legitimately lacks it.
 - No `eslint-disable` for typing rules — restructure types (`unknown` over `any`, drop needless `async`).
-- Don't re-`parse()` in repo methods — callers already validated.
+- Don't re-`parse()` in repo methods — callers must validate.
 - Errors/logs on LLM paths must not include raw model output (PII via entity names/facts) — surface only structural info / ZodError issues.
 - Avoid PII in logs / traces at all costs.
-- Comments: inline comments inside a body are one short line max, no multi-line explanatory blocks. A function/method/class's own description belongs in a `/** */` JSDoc docstring above the declaration, not `//` line comments (the one-line rule is for inline body comments, not the doc header).
+- Comments: inline comments inside a body are one short line max, no multi-line explanatory blocks.
+  A function/method/class's own description belongs in a `/** */` JSDoc docstring above the declaration,
+  not `//` line comments (the one-line rule is for inline body comments, not the doc header).
+- In general, instead of a comment, long, descriptive names for variables and
+  methods are preferred where applicable. The codebase is not trivial so something like `recomputeCanonicalNodesByCanonicalIdMap`
+  is a good method name. If you can read complex code like a sentence, it helps.
+- Helpers that read/mutate shared pipeline state (`items`/`batch` in the KG ingestion pipeline) end their JSDoc with a normalized data-flow section.
 - API stays presentation-agnostic — no colors, sizes, coordinates, or layout; the frontend owns visuals.
 - Omit `LlmContext.sessionId` unless there's a real session/conversation; never fall back to userId/graphId/jobId.
 - Prompt text: ASCII hyphens (no em dashes), real-newline wrapping (no trailing `\`), schema field refs in camelCase.
+  Cross reference other prompt files if working on prompts.
 - Tests: assert shape (length/instanceof/empty), not exact error strings; derive enum-driven values from Zod schemas instead of hardcoding.
   We test logic, rather than exact wording the developer specified.
 

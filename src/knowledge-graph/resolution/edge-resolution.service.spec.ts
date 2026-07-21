@@ -80,7 +80,7 @@ describe('EdgeResolutionService', () => {
   });
 
   describe('dedupeEdges', () => {
-    it('should collapse intra-batch exact duplicate to 1 survivor', async () => {
+    it('should collapse intra-batch exact duplicate to 1 newEdge', async () => {
       const edge1 = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice works at Acme',
@@ -104,9 +104,9 @@ describe('EdgeResolutionService', () => {
         KG_REFERENCE_TIME,
       );
 
-      expect(result.survivors).toHaveLength(1);
-      expect(result.survivors[0].episodes).toContain(u('ep-1'));
-      expect(result.survivors[0].episodes).toContain(u('ep-2'));
+      expect(result.newEdges).toHaveLength(1);
+      expect(result.newEdges[0].episodes).toContain(u('ep-1'));
+      expect(result.newEdges[0].episodes).toContain(u('ep-2'));
     });
 
     it('should remap source/target ids via idMap', async () => {
@@ -133,11 +133,11 @@ describe('EdgeResolutionService', () => {
         KG_REFERENCE_TIME,
       );
 
-      expect(result.survivors[0].sourceNodeId).toBe(u('new-src-id'));
-      expect(result.survivors[0].targetNodeId).toBe(u('new-tgt-id'));
+      expect(result.newEdges[0].sourceNodeId).toBe(u('new-src-id'));
+      expect(result.newEdges[0].targetNodeId).toBe(u('new-tgt-id'));
     });
 
-    it('should add edge to survivors when no candidates exist', async () => {
+    it('should add edge to newEdges when no candidates exist', async () => {
       const edge = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice works at Acme',
@@ -155,23 +155,23 @@ describe('EdgeResolutionService', () => {
       );
 
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
-      expect(result.survivors).toHaveLength(1);
-      expect(result.matchedExistingEdges).toHaveLength(0);
+      expect(result.newEdges).toHaveLength(1);
+      expect(result.matchedPreexistingEdges).toHaveLength(0);
     });
 
-    it('should route a duplicate to matchedExistingEdges with the episode appended', async () => {
+    it('should route a duplicate to matchedPreexistingEdges with the episode appended', async () => {
       const edge = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice works at Acme',
         factEmbedding: KG_HIGH_SIM_EMBEDDING,
         episodes: [baseEpisode.id],
       });
-      const existingEdge = makeEdge({
+      const preexistingEdge = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice works at Acme Corp',
         factEmbedding: KG_NEAR_SAME_EMBEDDING,
       });
-      existingEdge.id = u('exist-edge-id');
+      preexistingEdge.id = u('exist-edge-id');
 
       // idx 0 is in endpoint range (1 endpoint edge)
       mockRunnable.invoke.mockResolvedValue({
@@ -179,7 +179,7 @@ describe('EdgeResolutionService', () => {
         contradictedFacts: [],
       });
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue([existingEdge]);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue([preexistingEdge]);
       const result = await service.dedupeEdges(
         mockModel,
         [baseEpisode],
@@ -190,33 +190,33 @@ describe('EdgeResolutionService', () => {
         KG_REFERENCE_TIME,
       );
 
-      // The existing edge carries the new episode id so it can be re-persisted;
+      // The preexisting edge carries the new episode id so it can be re-persisted;
       // the extracted edge does not survive.
-      expect(result.survivors).toHaveLength(0);
-      expect(result.matchedExistingEdges).toHaveLength(1);
-      expect(result.matchedExistingEdges[0].id).toBe(u('exist-edge-id'));
-      expect(result.matchedExistingEdges[0].episodes).toContain(baseEpisode.id);
+      expect(result.newEdges).toHaveLength(0);
+      expect(result.matchedPreexistingEdges).toHaveLength(1);
+      expect(result.matchedPreexistingEdges[0].id).toBe(u('exist-edge-id'));
+      expect(result.matchedPreexistingEdges[0].episodes).toContain(baseEpisode.id);
     });
 
-    it('should record contradicted candidates per survivor', async () => {
+    it('should record contradicted candidates per newEdge', async () => {
       const edge = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice is now CEO at Acme',
         factEmbedding: KG_HIGH_SIM_EMBEDDING,
       });
-      const existingEdge = makeEdge({
+      const preexistingEdge = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice was an engineer at Acme',
         factEmbedding: KG_NEAR_SAME_EMBEDDING,
       });
-      existingEdge.id = u('old-edge-id');
+      preexistingEdge.id = u('old-edge-id');
 
       mockRunnable.invoke.mockResolvedValue({
         duplicateFacts: [],
         contradictedFacts: [0],
       });
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue([existingEdge]);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue([preexistingEdge]);
       const result = await service.dedupeEdges(
         mockModel,
         [baseEpisode],
@@ -227,10 +227,8 @@ describe('EdgeResolutionService', () => {
         KG_REFERENCE_TIME,
       );
 
-      expect(result.survivors).toHaveLength(1);
-      const contradictions = result.contradictionsBySurvivorId.get(
-        result.survivors[0].id,
-      );
+      expect(result.newEdges).toHaveLength(1);
+      const contradictions = result.contradictionsByNewEdgeId.get(result.newEdges[0].id);
       expect(contradictions).toHaveLength(1);
       expect(contradictions?.[0].id).toBe(u('old-edge-id'));
     });
@@ -299,7 +297,7 @@ describe('EdgeResolutionService', () => {
         KG_REFERENCE_TIME,
       );
 
-      expect(result.survivors[0].factEmbedding).toEqual(KG_HIGH_SIM_EMBEDDING);
+      expect(result.newEdges[0].factEmbedding).toEqual(KG_HIGH_SIM_EMBEDDING);
     });
 
     it('should include keyword-only edge in similar candidates when no factEmbedding', async () => {
@@ -371,65 +369,65 @@ describe('EdgeResolutionService', () => {
   });
 
   describe('invalidateEdges', () => {
-    // Pure arithmetic over the enriched survivors + the contradictions recorded
+    // Pure arithmetic over the enriched new edges + the contradictions recorded
     // by dedupeEdges. No model call.
     it('does not invalidate when both edges lack validAt', () => {
-      const survivor = makeEdge({ name: 'WORKS_AT', fact: 'Alice is now CEO at Acme' });
-      const existing = makeEdge({
+      const newEdge = makeEdge({ name: 'WORKS_AT', fact: 'Alice is now CEO at Acme' });
+      const preexisting = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice was an engineer at Acme',
       });
-      existing.id = u('old-edge-id');
+      preexisting.id = u('old-edge-id');
 
       const { invalidatedEdges } = service.invalidateEdges(
-        [survivor],
-        new Map([[survivor.id, [existing]]]),
+        [newEdge],
+        new Map([[newEdge.id, [preexisting]]]),
       );
 
       expect(invalidatedEdges).toHaveLength(0);
     });
 
-    it('invalidates a predating contradicted edge at the survivor validAt', () => {
-      const survivor = makeEdge({
+    it('invalidates a predating contradicted edge at the newEdge validAt', () => {
+      const newEdge = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice is now CEO at Acme',
         validAt: new Date('2024-06-01'),
       });
-      const existing = makeEdge({
+      const preexisting = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice was an engineer at Acme',
         validAt: new Date('2023-01-01'),
       });
-      existing.id = u('old-edge-id');
+      preexisting.id = u('old-edge-id');
 
-      const { invalidatedEdges, invalidatedBySurvivorId } = service.invalidateEdges(
-        [survivor],
-        new Map([[survivor.id, [existing]]]),
+      const { invalidatedEdges, invalidatedByNewEdgeId } = service.invalidateEdges(
+        [newEdge],
+        new Map([[newEdge.id, [preexisting]]]),
       );
 
       expect(invalidatedEdges).toHaveLength(1);
       expect(invalidatedEdges[0].id).toBe(u('old-edge-id'));
       expect(invalidatedEdges[0].invalidAt).toEqual(new Date('2024-06-01'));
       expect(invalidatedEdges[0].expiredAt).toBeInstanceOf(Date);
-      expect(invalidatedBySurvivorId.get(survivor.id)).toHaveLength(1);
+      expect(invalidatedByNewEdgeId.get(newEdge.id)).toHaveLength(1);
     });
 
-    it('expires a survivor that already carries an invalidAt (guard a)', () => {
-      const survivor = makeEdge({
+    it('expires a newEdge that already carries an invalidAt (guard a)', () => {
+      const newEdge = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice left Acme',
         validAt: new Date('2024-01-01'),
         invalidAt: new Date('2024-06-01'),
       });
-      expect(survivor.expiredAt).toBeNull();
+      expect(newEdge.expiredAt).toBeNull();
 
-      service.invalidateEdges([survivor], new Map());
+      service.invalidateEdges([newEdge], new Map());
 
-      expect(survivor.expiredAt).toBeInstanceOf(Date);
+      expect(newEdge.expiredAt).toBeInstanceOf(Date);
     });
 
-    it('self-expires a survivor superseded by a postdating contradiction (guard b)', () => {
-      const survivor = makeEdge({
+    it('self-expires a newEdge superseded by a postdating contradiction (guard b)', () => {
+      const newEdge = makeEdge({
         name: 'WORKS_AT',
         fact: 'Alice is an engineer at Acme',
         validAt: new Date('2023-01-01'),
@@ -442,13 +440,13 @@ describe('EdgeResolutionService', () => {
       later.id = u('later-edge-id');
 
       const { invalidatedEdges } = service.invalidateEdges(
-        [survivor],
-        new Map([[survivor.id, [later]]]),
+        [newEdge],
+        new Map([[newEdge.id, [later]]]),
       );
 
-      expect(survivor.invalidAt).toEqual(new Date('2024-06-01'));
-      expect(survivor.expiredAt).toBeInstanceOf(Date);
-      // `later` postdates the survivor, so it is not itself invalidated.
+      expect(newEdge.invalidAt).toEqual(new Date('2024-06-01'));
+      expect(newEdge.expiredAt).toBeInstanceOf(Date);
+      // `later` postdates the newEdge, so it is not itself invalidated.
       expect(invalidatedEdges).toHaveLength(0);
     });
   });

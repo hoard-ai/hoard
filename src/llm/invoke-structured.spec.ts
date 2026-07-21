@@ -1,5 +1,5 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { mockDeep } from 'jest-mock-extended';
 import { z } from 'zod';
 
@@ -63,10 +63,14 @@ describe('invokeStructured', () => {
     expect(mockRunnable.invoke).toHaveBeenCalledTimes(2);
 
     const [secondMessages, secondConfig] = mockRunnable.invoke.mock.calls[1] as [
-      Array<HumanMessage | SystemMessage>,
+      Array<AIMessage | HumanMessage | SystemMessage>,
       { runName?: string; tags?: string[] },
     ];
-    expect(secondMessages).toHaveLength(baseMessages.length + 1);
+    // Retry echoes the rejected output (AIMessage) then the feedback (HumanMessage).
+    expect(secondMessages).toHaveLength(baseMessages.length + 2);
+    const echoed = secondMessages[secondMessages.length - 2];
+    expect(echoed).toBeInstanceOf(AIMessage);
+    expect(echoed.content as string).toContain('next tuesday');
     expect(secondMessages[secondMessages.length - 1]).toBeInstanceOf(HumanMessage);
     expect(secondConfig.runName).toBe('extract-test.retry-1');
     expect(secondConfig.tags).toEqual(['test', 'retry']);
@@ -136,9 +140,10 @@ describe('invokeStructured', () => {
     expect(validate).toHaveBeenCalledTimes(2);
 
     const [secondMessages] = mockRunnable.invoke.mock.calls[1] as [
-      Array<HumanMessage | SystemMessage>,
+      Array<AIMessage | HumanMessage | SystemMessage>,
     ];
-    expect(secondMessages).toHaveLength(baseMessages.length + 1);
+    expect(secondMessages).toHaveLength(baseMessages.length + 2);
+    expect(secondMessages[secondMessages.length - 2]).toBeInstanceOf(AIMessage);
     expect(secondMessages[secondMessages.length - 1]).toBeInstanceOf(HumanMessage);
   });
 

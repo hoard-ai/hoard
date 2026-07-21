@@ -49,6 +49,12 @@ import {
 const LOUVAIN_SEED = 42;
 
 /**
+ * Clusters below this size are dropped: a tiny community wastes an LLM
+ * summarize/embed and conveys nothing a member's own summary doesn't.
+ */
+const MIN_COMMUNITY_SIZE = 3;
+
+/**
  * Per-route pending result of the parallel reduce-and-name phase. Embedding
  * and persistence happen after collision resolution in a single post-pass.
  */
@@ -119,7 +125,7 @@ export class CommunityService {
     // 1. Build the weighted graph and detect communities via Louvain.
     const nodeIds = await this.entityNodeRepo.findIdsForGraph(graphId);
 
-    if (nodeIds.length < 2) {
+    if (nodeIds.length < MIN_COMMUNITY_SIZE) {
       await this.communityRepo.deleteByGraphId(graphId);
       return {
         metrics: {
@@ -506,7 +512,7 @@ export class CommunityService {
       model,
       summary,
       existingNames,
-      lastPairInputs ?? [summary, summary], // type guarantee for N<=1; Louvain drops singletons upstream
+      lastPairInputs ?? [summary, summary], // type guarantee for N<=1; detectCommunities drops sub-minimum clusters upstream
       ctx,
     );
     return { name, summary };
@@ -615,12 +621,13 @@ export class CommunityService {
 
   /**
    * Build the weighted undirected graph from node ids + Postgres-aggregated
-   * edges and partition it into communities via Louvain modularity
+   * edges and partition it into communities of size >= 3 via Louvain modularity
    * optimization. Parallel facts between a pair raise their edge weight, so
-   * densely-linked entities cluster together. Singleton clusters (isolated
-   * nodes or one-member partitions) are dropped - a one-entity community wastes
-   * an LLM summarize/embed and conveys nothing. Returned clusters have sorted
-   * members for stable signatures.
+   * densely-linked entities cluster together. Invalidated/expired edges still
+   * count toward pair weights (the aggregation applies no invalidAt/expiredAt
+   * filter) - deliberate: a contradicted fact remains shared history binding
+   * its entities. Returned clusters have sorted members for stable
+   * signatures.
    */
   private static detectCommunities(
     nodeIds: Uuid[],
@@ -647,7 +654,7 @@ export class CommunityService {
       byCommunity.set(community, members);
     }
     return [...byCommunity.values()]
-      .filter((members) => members.length > 1)
+      .filter((members) => members.length >= MIN_COMMUNITY_SIZE)
       .map((members) => members.sort());
   }
 

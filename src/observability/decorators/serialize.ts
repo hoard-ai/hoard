@@ -23,6 +23,22 @@ function isPrismaClient(val: object): boolean {
   }
 }
 
+function serializeMap(map: Map<unknown, unknown>): unknown {
+  if (map.size >= MAX_ARRAY_LENGTH) return `<oversized_map:${map.size}>`;
+  const entries = [...map.entries()];
+  if (
+    entries.every((entry): entry is [string, unknown] => typeof entry[0] === 'string')
+  ) {
+    return Object.fromEntries(entries);
+  }
+  return entries;
+}
+
+function serializeSet(set: Set<unknown>): unknown {
+  if (set.size >= MAX_ARRAY_LENGTH) return `<oversized_set:${set.size}>`;
+  return [...set];
+}
+
 export function safeStringify(value: unknown): string {
   if (typeof value === 'string') return value;
   try {
@@ -39,6 +55,8 @@ export function safeStringify(value: unknown): string {
         if (seen.has(val)) return '<cycle>';
         if (isPrismaClient(val)) return '<prisma client>';
         seen.add(val);
+        if (val instanceof Map) return serializeMap(val);
+        if (val instanceof Set) return serializeSet(val);
       }
       return val;
     });

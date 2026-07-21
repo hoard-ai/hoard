@@ -623,7 +623,8 @@ describe('LlmService', () => {
         `user:${TEST_USER_UUID}:${LlmProvider.ANTHROPIC}`,
         DEFAULT_MODEL_CONCURRENCY,
         undefined,
-        expect.any(Function),
+        expect.any(Function), // wrapped _generate
+        expect.any(Function), // onAdmitted queue-wait telemetry
       );
     });
 

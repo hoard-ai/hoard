@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { EpisodicNode } from '@/knowledge-graph/models';
 import type { Violation } from '@/llm';
 
+import { buildCoreferenceBlock, type CorefChunkGroup } from '../coref-utils';
 import { formatCurrentEpisode, formatPromptTimestamp } from '../text-utils';
 
 // Schema
@@ -201,8 +202,18 @@ export function buildEnrichEdgeMessages(ctx: {
   referenceTime: Date;
   existingAttributes?: Record<string, unknown>;
   hasCustomAttributes: boolean;
+  coreferences?: CorefChunkGroup[];
+  labelChunks?: boolean;
 }): BaseMessage[] {
-  const { fact, episode, referenceTime, existingAttributes, hasCustomAttributes } = ctx;
+  const {
+    fact,
+    episode,
+    referenceTime,
+    existingAttributes,
+    hasCustomAttributes,
+    coreferences,
+    labelChunks,
+  } = ctx;
 
   let humanContent = `Apply every rule from the system instructions when enriching the fact below.
 
@@ -219,6 +230,13 @@ ${formatPromptTimestamp(referenceTime)}
 </REFERENCE TIME>
 
 ${buildTimeReferenceTable(referenceTime)}`;
+
+  const corefBlock = coreferences?.length
+    ? buildCoreferenceBlock({ committed: coreferences, labelChunks })
+    : null;
+  if (corefBlock) {
+    humanContent += `\n\n${corefBlock}\n\nThe COREFERENCES above were resolved during extraction; each applies where its quoted occurrence appears in the text.`;
+  }
 
   if (hasCustomAttributes) {
     humanContent += `

@@ -1,6 +1,7 @@
 import type { BaseMessage } from '@langchain/core/messages';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 
+import { buildCoreferenceBlock, type CorefChunkGroup } from '../coref-utils';
 import { formatPromptTimestamp } from '../text-utils';
 
 // Schema
@@ -95,6 +96,8 @@ export function buildFillEntityAttributesMessages(ctx: {
   relatedFacts: string[];
   referenceTime: Date;
   existingAttributes: Record<string, unknown>;
+  coreferences?: CorefChunkGroup[];
+  labelChunks?: boolean;
 }): BaseMessage[] {
   const {
     entityName,
@@ -103,6 +106,8 @@ export function buildFillEntityAttributesMessages(ctx: {
     relatedFacts,
     referenceTime,
     existingAttributes,
+    coreferences,
+    labelChunks,
   } = ctx;
 
   let humanContent = `Apply every rule from the system instructions when updating the attributes for the entity below.
@@ -114,6 +119,13 @@ ${entityName}
 <EPISODE>
 ${episodeContent}
 </EPISODE>`;
+
+  const corefBlock = coreferences?.length
+    ? buildCoreferenceBlock({ committed: coreferences, labelChunks })
+    : null;
+  if (corefBlock) {
+    humanContent += `\n\n${corefBlock}\n\nThe COREFERENCES above were resolved during extraction; each applies where its quoted occurrence appears in the text.`;
+  }
 
   if (previousEpisodesContent.length > 0) {
     humanContent += `

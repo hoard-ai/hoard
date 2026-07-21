@@ -77,7 +77,7 @@ export class EdgeResolutionService {
     graphId: Uuid,
   ): Promise<{ candidates: EntityEdge[]; metrics: SpanMetrics }> {
     // Same-endpoint edges (`getBetweenNodes`) are fetched explicitly per edge:
-    // text + similarity searches may not surface an existing edge whose fact
+    // text + similarity searches may not surface a preexisting edge whose fact
     // differs textually from the new one, but a duplicate or contradiction
     // between the same two nodes still needs to be considered during dedup.
     // Mirrors upstream `EntityEdge.get_between_nodes` in edge_operations.py.
@@ -121,10 +121,10 @@ export class EdgeResolutionService {
   /**
    * Dedup pass (vs the live graph). Runs the `dedupe-edges` LLM comparison for
    * each extracted edge and partitions the results:
-   * - `matchedExistingEdges`: existing graph edges an extracted edge duplicated,
+   * - `matchedPreexistingEdges`: preexisting graph edges an extracted edge duplicated,
    *   with the new episode(s) appended (re-saved as-is, never enriched).
-   * - `survivors`: freshly extracted edges with no duplicate (= newEdges).
-   * - `contradictionsBySurvivorId`: per survivor, the existing edges it
+   * - `newEdges`: freshly extracted edges with no duplicate.
+   * - `contradictionsByNewEdgeId`: per new edge, the preexisting edges it
    *   contradicts
    */
   async dedupeEdges(
@@ -180,7 +180,7 @@ export class EdgeResolutionService {
     }
 
     // Candidates use the remapped (canonical) endpoints for getBetweenNodes.
-    const existingEdges = remapped.length
+    const preexistingEdges = remapped.length
       ? await this.collectCandidates(remapped, remapped[0].graphId)
       : [];
 
@@ -208,16 +208,16 @@ export class EdgeResolutionService {
       }
     }
 
-    const matchedExistingEdges: EntityEdge[] = [];
-    const survivors: EntityEdge[] = [];
-    const resolvedExistingIds = new Set<Uuid>();
-    const contradictionsBySurvivorId = new Map<Uuid, EntityEdge[]>();
+    const matchedPreexistingEdges: EntityEdge[] = [];
+    const newEdges: EntityEdge[] = [];
+    const resolvedPreexistingIds = new Set<Uuid>();
+    const contradictionsByNewEdgeId = new Map<Uuid, EntityEdge[]>();
 
     for (const edge of deduped) {
-      // Find same-endpoint existing edges (same direction only). Reversed-direction
+      // Find same-endpoint preexisting edges (same direction only). Reversed-direction
       // duplicates are left to cosine/keyword retrieval to surface as similar-topic
       // candidates - the prompt does not reason about endpoint direction.
-      const endpointEdges = existingEdges.filter(
+      const endpointEdges = preexistingEdges.filter(
         (e) =>
           e.sourceNodeId === edge.sourceNodeId && e.targetNodeId === edge.targetNodeId,
       );
@@ -228,7 +228,7 @@ export class EdgeResolutionService {
       // Cosine candidates (in-memory)
       const cosineEdges: EntityEdge[] =
         edge.factEmbedding !== null
-          ? existingEdges
+          ? preexistingEdges
               .filter((e) => !endpointIds.has(e.id) && e.factEmbedding !== null)
               .map((e) => ({
                 edge: e,
@@ -257,7 +257,7 @@ export class EdgeResolutionService {
       const similarEdges: EntityEdge[] = [...cosineEdges, ...keywordOnly];
 
       if (endpointEdges.length === 0 && similarEdges.length === 0) {
-        survivors.push(edge);
+        newEdges.push(edge);
         continue;
       }
 
@@ -276,27 +276,27 @@ export class EdgeResolutionService {
 
       if (isDuplicate) {
         // Append the resolved edge's originating episode(s) to the matching
-        // existing endpoint edge(s) and include them so they are re-saved with
+        // preexisting endpoint edge(s) and include them so they are re-saved with
         // updated episodes. Using edge.episodes (not a single batch episode)
         // stays correct when the list holds a cross-episode-merged edge.
         // Mirrors Python edge_operations.py:523-524 and 581-582.
         //
         // NOTE (accepted behavior): duplicates are NOT adjudicated for
-        // contradictions. A new edge that both duplicates an existing edge AND
+        // contradictions. A new edge that both duplicates a preexisting edge AND
         // contradicts a third edge does not re-invalidate the third edge here
         for (const idx of dedupe.duplicateFacts) {
-          const existingEdge = idxToEdge.get(idx)!;
+          const preexistingEdge = idxToEdge.get(idx)!;
 
-          if (resolvedExistingIds.has(existingEdge.id)) continue;
+          if (resolvedPreexistingIds.has(preexistingEdge.id)) continue;
           for (const ep of edge.episodes) {
-            if (!existingEdge.episodes.includes(ep)) existingEdge.episodes.push(ep);
+            if (!preexistingEdge.episodes.includes(ep)) preexistingEdge.episodes.push(ep);
           }
-          matchedExistingEdges.push(existingEdge);
-          resolvedExistingIds.add(existingEdge.id);
+          matchedPreexistingEdges.push(preexistingEdge);
+          resolvedPreexistingIds.add(preexistingEdge.id);
         }
       } else {
-        survivors.push(edge);
-        contradictionsBySurvivorId.set(
+        newEdges.push(edge);
+        contradictionsByNewEdgeId.set(
           edge.id,
           dedupe.contradictedFacts.map((idx) => idxToEdge.get(idx)!),
         );
@@ -304,86 +304,86 @@ export class EdgeResolutionService {
     }
 
     return {
-      matchedExistingEdges,
-      survivors,
-      contradictionsBySurvivorId,
+      matchedPreexistingEdges,
+      newEdges,
+      contradictionsByNewEdgeId,
       metrics: {
         'episodes.count': episodes.length,
         'extracted.count': extractedEdges.length,
-        'existing.count': existingEdges.length,
-        'matched.count': matchedExistingEdges.length,
-        'survivors.count': survivors.length,
+        'preexisting.count': preexistingEdges.length,
+        'matched.count': matchedPreexistingEdges.length,
+        'new.count': newEdges.length,
       },
     };
   }
 
   /**
-   * Temporal invalidation over the enriched survivors. Pure arithmetic over the
+   * Temporal invalidation over the enriched new edges. Pure arithmetic over the
    * now-filled validAt/invalidAt (no model call). Consumes the contradictions
-   * recorded by `dedupeEdges`. Runs GLOBALLY over the whole batch's survivors so
-   * an existing edge contradicted by survivors in two episodes is invalidated
-   * once (first-survivor-wins); `invalidatedBySurvivorId` lets the orchestrator
+   * recorded by `dedupeEdges`. Runs GLOBALLY over the whole batch's new edges so
+   * a preexisting edge contradicted by new edges in two episodes is invalidated
+   * once (first new edge wins); `invalidatedByNewEdgeId` lets the orchestrator
    * attribute each invalidation back to its origin episode.
    */
   invalidateEdges(
-    survivors: EntityEdge[],
-    contradictionsBySurvivorId: Map<Uuid, EntityEdge[]>,
+    newEdges: EntityEdge[],
+    contradictionsByNewEdgeId: Map<Uuid, EntityEdge[]>,
   ): {
     invalidatedEdges: EntityEdge[];
-    invalidatedBySurvivorId: Map<Uuid, EntityEdge[]>;
+    invalidatedByNewEdgeId: Map<Uuid, EntityEdge[]>;
   } {
     const { metrics: _m, ...rest } = this.invalidateEdgesImpl(
-      survivors,
-      contradictionsBySurvivorId,
+      newEdges,
+      contradictionsByNewEdgeId,
     );
     return rest;
   }
 
   @Span('invalidateEdges', { onResult: metricsOnResult })
   private invalidateEdgesImpl(
-    survivors: EntityEdge[],
-    contradictionsBySurvivorId: Map<Uuid, EntityEdge[]>,
+    newEdges: EntityEdge[],
+    contradictionsByNewEdgeId: Map<Uuid, EntityEdge[]>,
   ): {
     invalidatedEdges: EntityEdge[];
-    invalidatedBySurvivorId: Map<Uuid, EntityEdge[]>;
+    invalidatedByNewEdgeId: Map<Uuid, EntityEdge[]>;
     metrics: SpanMetrics;
   } {
     const invalidatedEdgesMap = new Map<Uuid, EntityEdge>();
-    const invalidatedBySurvivorId = new Map<Uuid, EntityEdge[]>();
+    const invalidatedByNewEdgeId = new Map<Uuid, EntityEdge[]>();
 
-    for (const survivor of survivors) {
-      const contradictions = contradictionsBySurvivorId.get(survivor.id) ?? [];
+    for (const newEdge of newEdges) {
+      const contradictions = contradictionsByNewEdgeId.get(newEdge.id) ?? [];
 
       // Guard (a): the new edge already carries an end - mark it expired now.
-      if (survivor.invalidAt && !survivor.expiredAt) {
-        survivor.expiredAt = new Date();
+      if (newEdge.invalidAt && !newEdge.expiredAt) {
+        newEdge.expiredAt = new Date();
       }
 
       // Guard (b): self-expiration - if any contradiction candidate postdates
       // this edge, the edge is superseded by information already in the graph.
-      if (!survivor.expiredAt && survivor.validAt !== null) {
+      if (!newEdge.expiredAt && newEdge.validAt !== null) {
         const contradictionCandidates = contradictions
           .filter((c) => c.validAt !== null)
           .sort((a, b) => a.validAt!.getTime() - b.validAt!.getTime());
         for (const candidate of contradictionCandidates) {
-          if (candidate.validAt! > survivor.validAt) {
-            survivor.invalidAt = candidate.validAt;
-            survivor.expiredAt = new Date();
+          if (candidate.validAt! > newEdge.validAt) {
+            newEdge.invalidAt = candidate.validAt;
+            newEdge.expiredAt = new Date();
             break;
           }
         }
       }
 
-      // Guard (c): invalidate existing edges that genuinely overlap with the new
+      // Guard (c): invalidate preexisting edges that genuinely overlap with the new
       // edge's validity window and predate it. Mirrors Python
       // resolve_edge_contradictions (edge_operations.py:425-460).
-      for (const existing of contradictions) {
-        if (invalidatedEdgesMap.has(existing.id)) continue;
+      for (const preexisting of contradictions) {
+        if (invalidatedEdgesMap.has(preexisting.id)) continue;
 
-        const edgeInvalidAt = existing.invalidAt;
-        const resolvedValidAt = survivor.validAt;
-        const edgeValidAt = existing.validAt;
-        const resolvedInvalidAt = survivor.invalidAt;
+        const edgeInvalidAt = preexisting.invalidAt;
+        const resolvedValidAt = newEdge.validAt;
+        const edgeValidAt = preexisting.validAt;
+        const resolvedInvalidAt = newEdge.invalidAt;
 
         // Skip if there is no temporal overlap between the two edges.
         if (
@@ -396,21 +396,21 @@ export class EdgeResolutionService {
         )
           continue;
 
-        // Only invalidate if the existing edge predates the new edge.
+        // Only invalidate if the preexisting edge predates the new edge.
         if (
           edgeValidAt !== null &&
           resolvedValidAt !== null &&
           edgeValidAt < resolvedValidAt
         ) {
           const invalidated: EntityEdge = {
-            ...existing,
-            invalidAt: survivor.validAt,
-            expiredAt: existing.expiredAt ?? new Date(),
+            ...preexisting,
+            invalidAt: newEdge.validAt,
+            expiredAt: preexisting.expiredAt ?? new Date(),
           };
-          invalidatedEdgesMap.set(existing.id, invalidated);
-          const list = invalidatedBySurvivorId.get(survivor.id) ?? [];
+          invalidatedEdgesMap.set(preexisting.id, invalidated);
+          const list = invalidatedByNewEdgeId.get(newEdge.id) ?? [];
           list.push(invalidated);
-          invalidatedBySurvivorId.set(survivor.id, list);
+          invalidatedByNewEdgeId.set(newEdge.id, list);
         }
       }
     }
@@ -418,9 +418,9 @@ export class EdgeResolutionService {
 
     return {
       invalidatedEdges,
-      invalidatedBySurvivorId,
+      invalidatedByNewEdgeId,
       metrics: {
-        'survivors.count': survivors.length,
+        'new.count': newEdges.length,
         'invalidated.count': invalidatedEdges.length,
       },
     };
@@ -619,7 +619,7 @@ export class EdgeResolutionService {
   }> {
     // TODO: reversed-direction duplicates can slip through. Endpoint matching
     // is same-direction only (matches Graphiti), so a fact like "Acme employs
-    // Alice" won't collide with an existing "Alice works at Acme" via the
+    // Alice" won't collide with a preexisting "Alice works at Acme" via the
     // endpoint bucket. It only surfaces if cosine/keyword retrieval lifts it
     // into similarEdges - and even then the duplicate guard ignores matches
     // outside the endpoint range, so the LLM can only flag it as a

@@ -71,10 +71,10 @@ describe('NodeResolutionService', () => {
   describe('resolveNodes', () => {
     it('should resolve exact name match without LLM call', async () => {
       const extracted = [makeNode('Alice', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [makeNode('alice', KG_HIGH_SIM_EMBEDDING)]; // normalizes to same
-      existing[0].id = u('existing-id');
+      const preexisting = [makeNode('alice', KG_HIGH_SIM_EMBEDDING)]; // normalizes to same
+      preexisting[0].id = u('preexisting-id');
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -84,16 +84,18 @@ describe('NodeResolutionService', () => {
       );
 
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
-      expect(result.idMap.get(extracted[0].id)).toBe('existing-id');
-      expect(result.resolvedNodes).toHaveLength(0);
+      expect(result.nodesMatchedToPreexistingNodes).toEqual([
+        { extractedId: extracted[0].id, preexistingNodeId: u('preexisting-id') },
+      ]);
+      expect(result.newNodes).toHaveLength(0);
     });
 
     it('should add duplicate pair for exact name match', async () => {
       const extracted = [makeNode('Alice', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [makeNode('alice', KG_HIGH_SIM_EMBEDDING)];
-      existing[0].id = u('existing-id');
+      const preexisting = [makeNode('alice', KG_HIGH_SIM_EMBEDDING)];
+      preexisting[0].id = u('preexisting-id');
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -102,23 +104,23 @@ describe('NodeResolutionService', () => {
         extracted,
       );
 
-      expect(result.duplicatePairs).toHaveLength(1);
-      expect(result.duplicatePairs[0]).toEqual({
+      expect(result.nodesMatchedToPreexistingNodes).toHaveLength(1);
+      expect(result.nodesMatchedToPreexistingNodes[0]).toEqual({
         extractedId: extracted[0].id,
-        canonicalId: u('existing-id'),
+        preexistingNodeId: u('preexisting-id'),
       });
     });
 
     it('should escalate single cosine candidate to LLM', async () => {
       const extracted = [makeNode('Alice Johnson', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [makeNode('Alice J.', KG_NEAR_SAME_EMBEDDING)];
-      existing[0].id = u('cosine-id');
+      const preexisting = [makeNode('Alice J.', KG_NEAR_SAME_EMBEDDING)];
+      preexisting[0].id = u('cosine-id');
 
       mockRunnable.invoke.mockResolvedValue({
         entityResolutions: [{ id: 0, name: 'Alice Johnson', duplicateCandidateId: 0 }],
       });
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -128,20 +130,22 @@ describe('NodeResolutionService', () => {
       );
 
       expect(mockModel.withStructuredOutput).toHaveBeenCalled();
-      expect(result.idMap.get(extracted[0].id)).toBe('cosine-id');
-      expect(result.resolvedNodes).toHaveLength(0);
+      expect(result.nodesMatchedToPreexistingNodes).toEqual([
+        { extractedId: extracted[0].id, preexistingNodeId: u('cosine-id') },
+      ]);
+      expect(result.newNodes).toHaveLength(0);
     });
 
     it('should add as new node when LLM rejects single cosine candidate', async () => {
       const extracted = [makeNode('Alice Johnson', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [makeNode('Alice J.', KG_NEAR_SAME_EMBEDDING)];
-      existing[0].id = u('cosine-id');
+      const preexisting = [makeNode('Alice J.', KG_NEAR_SAME_EMBEDDING)];
+      preexisting[0].id = u('cosine-id');
 
       mockRunnable.invoke.mockResolvedValue({
         entityResolutions: [{ id: 0, name: 'Alice Johnson', duplicateCandidateId: -1 }],
       });
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -151,13 +155,13 @@ describe('NodeResolutionService', () => {
       );
 
       expect(mockModel.withStructuredOutput).toHaveBeenCalled();
-      expect(result.idMap.has(extracted[0].id)).toBe(false);
-      expect(result.resolvedNodes).toHaveLength(1);
+      expect(result.nodesMatchedToPreexistingNodes).toHaveLength(0);
+      expect(result.newNodes).toHaveLength(1);
     });
 
     it('should escalate multiple cosine candidates to LLM', async () => {
       const extracted = [makeNode('Alice', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [
+      const preexisting = [
         {
           ...makeNode('Alice Smith', KG_NEAR_SAME_EMBEDDING),
           id: u('exist-1'),
@@ -172,7 +176,7 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice', duplicateCandidateId: 0 }],
       });
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -182,12 +186,14 @@ describe('NodeResolutionService', () => {
       );
 
       expect(mockModel.withStructuredOutput).toHaveBeenCalled();
-      expect(result.idMap.get(extracted[0].id)).toBe('exist-1');
+      expect(result.nodesMatchedToPreexistingNodes).toEqual([
+        { extractedId: extracted[0].id, preexistingNodeId: u('exist-1') },
+      ]);
     });
 
     it('should add duplicate pair when LLM returns a duplicate_name match', async () => {
       const extracted = [makeNode('Alice', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [
+      const preexisting = [
         {
           ...makeNode('Alice Smith', KG_NEAR_SAME_EMBEDDING),
           id: u('exist-1'),
@@ -202,7 +208,7 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice', duplicateCandidateId: 0 }],
       });
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -211,16 +217,16 @@ describe('NodeResolutionService', () => {
         extracted,
       );
 
-      expect(result.duplicatePairs).toHaveLength(1);
-      expect(result.duplicatePairs[0]).toEqual({
+      expect(result.nodesMatchedToPreexistingNodes).toHaveLength(1);
+      expect(result.nodesMatchedToPreexistingNodes[0]).toEqual({
         extractedId: extracted[0].id,
-        canonicalId: 'exist-1',
+        preexistingNodeId: 'exist-1',
       });
     });
 
-    it('should add node to resolvedNodes when LLM returns empty duplicate_name', async () => {
+    it('should add node to newNodes when LLM returns empty duplicate_name', async () => {
       const extracted = [makeNode('Alice', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [
+      const preexisting = [
         {
           ...makeNode('Alice Smith', KG_NEAR_SAME_EMBEDDING),
           id: u('exist-1'),
@@ -235,7 +241,7 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice', duplicateCandidateId: -1 }],
       });
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -244,45 +250,15 @@ describe('NodeResolutionService', () => {
         extracted,
       );
 
-      expect(result.idMap.has(extracted[0].id)).toBe(false);
-      expect(result.resolvedNodes).toContainEqual(
+      expect(result.newNodes).toContainEqual(
         expect.objectContaining({ id: extracted[0].id }),
       );
-      expect(result.duplicatePairs).toHaveLength(0);
-    });
-
-    it('should map id when LLM returns duplicate_name matching an existing node', async () => {
-      const extracted = [makeNode('Alice', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [
-        {
-          ...makeNode('Alice Smith', KG_NEAR_SAME_EMBEDDING),
-          id: u('exist-1'),
-        },
-        {
-          ...makeNode('Alice Jones', KG_NEAR_SAME_EMBEDDING),
-          id: u('exist-2'),
-        },
-      ];
-
-      mockRunnable.invoke.mockResolvedValue({
-        entityResolutions: [{ id: 0, name: 'Alice', duplicateCandidateId: 0 }],
-      });
-
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
-      const result = await service.resolveNodes(
-        mockModel,
-        baseEpisode,
-        [baseEpisode.content],
-        chunkIndices(...extracted),
-        extracted,
-      );
-
-      expect(result.idMap.get(extracted[0].id)).toBe('exist-1');
+      expect(result.nodesMatchedToPreexistingNodes).toHaveLength(0);
     });
 
     it('should apply canonical name from LLM when different from extracted name', async () => {
       const extracted = [makeNode('alice', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [
+      const preexisting = [
         {
           ...makeNode('Alice Smith', KG_NEAR_SAME_EMBEDDING),
           id: u('exist-1'),
@@ -297,7 +273,7 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'Alice Smith', duplicateCandidateId: -1 }],
       });
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -306,13 +282,13 @@ describe('NodeResolutionService', () => {
         extracted,
       );
 
-      expect(result.resolvedNodes[0].name).toBe('Alice Smith');
+      expect(result.newNodes[0].name).toBe('Alice Smith');
     });
 
     it('should bypass cosine for low-entropy names and go to LLM', async () => {
       // "bob" entropy ≈ 0.918 (b:2, o:1) - below the 1.5 threshold → skips cosine
       const extracted = [makeNode('bob', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [
+      const preexisting = [
         {
           ...makeNode('Bobby', KG_DIFF_EMBEDDING),
           id: u('bob-exist'),
@@ -323,7 +299,7 @@ describe('NodeResolutionService', () => {
         entityResolutions: [{ id: 0, name: 'bob', duplicateCandidateId: 0 }],
       });
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -333,23 +309,25 @@ describe('NodeResolutionService', () => {
       );
 
       expect(mockModel.withStructuredOutput).toHaveBeenCalled();
-      expect(result.idMap.get(extracted[0].id)).toBe('bob-exist');
+      expect(result.nodesMatchedToPreexistingNodes).toEqual([
+        { extractedId: extracted[0].id, preexistingNodeId: u('bob-exist') },
+      ]);
     });
 
     it('should use cosine for names with entropy above threshold (e.g. "alice")', async () => {
       // "alice" entropy ≈ 2.32 (a,l,i,c,e - all distinct) - above the 1.5 threshold → cosine path.
-      // Existing node "alicia" does not exact-match "alice" after normalizeString, so the
+      // Preexisting node "alicia" does not exact-match "alice" after normalizeString, so the
       // cosine scan runs. With KG_DIFF_EMBEDDING the cosine score is below threshold, so
       // no candidate is found and alice is added as a new node without any LLM call.
       const extracted = [makeNode('alice', KG_HIGH_SIM_EMBEDDING)];
-      const existing = [
+      const preexisting = [
         {
           ...makeNode('alicia', KG_DIFF_EMBEDDING),
           id: u('alicia-exist'),
         },
       ];
 
-      jest.spyOn(service, 'collectCandidates').mockResolvedValue(existing);
+      jest.spyOn(service, 'collectCandidates').mockResolvedValue(preexisting);
       const result = await service.resolveNodes(
         mockModel,
         baseEpisode,
@@ -359,11 +337,11 @@ describe('NodeResolutionService', () => {
       );
 
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
-      expect(result.resolvedNodes).toHaveLength(1);
-      expect(result.resolvedNodes[0].name).toBe('alice');
+      expect(result.newNodes).toHaveLength(1);
+      expect(result.newNodes[0].name).toBe('alice');
     });
 
-    it('should return all as new nodes with empty idMap when no existing nodes', async () => {
+    it('should return all as new nodes when no preexisting nodes', async () => {
       const extracted = [
         makeNode('Alice', KG_HIGH_SIM_EMBEDDING),
         makeNode('Bob', KG_HIGH_SIM_EMBEDDING),
@@ -379,9 +357,8 @@ describe('NodeResolutionService', () => {
       );
 
       expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
-      expect(result.resolvedNodes).toHaveLength(2);
-      expect(result.idMap.size).toBe(0);
-      expect(result.duplicatePairs).toHaveLength(0);
+      expect(result.newNodes).toHaveLength(2);
+      expect(result.nodesMatchedToPreexistingNodes).toHaveLength(0);
     });
   });
 
@@ -461,13 +438,85 @@ describe('NodeResolutionService', () => {
       expect(pairs).toEqual([]);
     });
 
-    it('seeded canonical pool: new node collapses onto matched-existing', () => {
-      const existing = { ...makeNode('Alice', [1, 0]), id: u('existing') };
+    it('seeded canonical pool: new node collapses onto matched-preexisting', () => {
+      const preexisting = { ...makeNode('Alice', [1, 0]), id: u('preexisting') };
       const newNode = { ...makeNode('Alicia', [1, 0]), id: u('new') };
 
-      const pairs = service.dedupeAcrossBatch([newNode], [existing]);
+      const pairs = service.dedupeAcrossBatch([newNode], [preexisting]);
 
-      expect(pairs).toEqual([[u('new'), u('existing')]]);
+      expect(pairs).toEqual([[u('new'), u('preexisting')]]);
+    });
+  });
+
+  // ─── canonicalizeEpisodeNodes ──────────────────────────────────────────────
+
+  describe('canonicalizeEpisodeNodes', () => {
+    const descriptorsFor = (
+      ...nodes: EntityNode[]
+    ): Map<
+      Uuid,
+      {
+        identifyingDescription: string;
+        aliases: string[];
+        referredToAsPronouns: string[];
+      }
+    > =>
+      new Map(
+        nodes.map((n) => [
+          n.id,
+          {
+            identifyingDescription: `${n.name} descriptor`,
+            aliases: [],
+            referredToAsPronouns: [],
+          },
+        ]),
+      );
+
+    it('derives (mergedAway, kept) pairs from each group, canonical first in the group', async () => {
+      const named = makeNode('Dr. Elena Marquez');
+      const phantom = makeNode('biologist');
+      const other = makeNode('Valparaiso');
+      mockRunnable.invoke.mockResolvedValue({ duplicateGroups: [[0, 1]] });
+
+      const pairs = await service.canonicalizeEpisodeNodes(
+        mockModel,
+        [named, phantom, other],
+        descriptorsFor(named, phantom, other),
+      );
+
+      expect(pairs).toEqual([[phantom.id, named.id]]);
+    });
+
+    it('skips the LLM entirely for fewer than two nodes', async () => {
+      const only = makeNode('Alice');
+
+      const pairs = await service.canonicalizeEpisodeNodes(
+        mockModel,
+        [only],
+        descriptorsFor(only),
+      );
+
+      expect(pairs).toEqual([]);
+      expect(mockModel.withStructuredOutput).not.toHaveBeenCalled();
+    });
+
+    it('throws when a node is missing its descriptor', async () => {
+      const a = makeNode('Alice');
+      const b = makeNode('Bob');
+
+      await expect(
+        service.canonicalizeEpisodeNodes(mockModel, [a, b], descriptorsFor(a)),
+      ).rejects.toThrow();
+    });
+
+    it('surfaces validator rejection of out-of-range group ids after retries', async () => {
+      const a = makeNode('Alice');
+      const b = makeNode('Bob');
+      mockRunnable.invoke.mockResolvedValue({ duplicateGroups: [[0, 9]] });
+
+      await expect(
+        service.canonicalizeEpisodeNodes(mockModel, [a, b], descriptorsFor(a, b)),
+      ).rejects.toThrow();
     });
   });
 });

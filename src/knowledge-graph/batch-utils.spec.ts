@@ -3,7 +3,8 @@ import type { Uuid } from '@/common/schemas';
 import {
   buildDirectedIdMap,
   compressIdMap,
-  resolveEdgePointers,
+  CountingSemaphore,
+  remapEdgeEndpointsToCanonical,
   UnionFind,
   withConcurrency,
 } from './batch-utils';
@@ -42,6 +43,29 @@ describe('withConcurrency', () => {
     });
     await withConcurrency(limit, tasks);
     expect(maxActive).toBeLessThanOrEqual(limit);
+  });
+
+  it('shares one concurrency budget across calls given the same semaphore', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const limit = 3;
+    const semaphore = new CountingSemaphore(limit);
+    const makeTasks = () =>
+      Array.from({ length: 6 }, () => () => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        return Promise.resolve().then(() => {
+          active--;
+          return 1;
+        });
+      });
+    const [first, second] = await Promise.all([
+      withConcurrency(semaphore, makeTasks()),
+      withConcurrency(semaphore, makeTasks()),
+    ]);
+    expect(maxActive).toBeLessThanOrEqual(limit);
+    expect(first).toHaveLength(6);
+    expect(second).toHaveLength(6);
   });
 
   it('rethrows a task rejection', async () => {
@@ -165,14 +189,14 @@ const makeEdge = (id: string, sourceNodeId: string, targetNodeId: string) => ({
   attributes: {},
 });
 
-describe('resolveEdgePointers', () => {
+describe('remapEdgeEndpointsToCanonical', () => {
   it('remaps sourceNodeId and targetNodeId via map', () => {
     const edge = makeEdge('e1', 'old-src', 'old-tgt');
     const idMap = new Map<Uuid, Uuid>([
       [u('old-src'), u('new-src')],
       [u('old-tgt'), u('new-tgt')],
     ]);
-    const [result] = resolveEdgePointers([edge], idMap);
+    const [result] = remapEdgeEndpointsToCanonical([edge], idMap);
     expect(result.sourceNodeId).toBe('new-src');
     expect(result.targetNodeId).toBe('new-tgt');
   });
@@ -180,7 +204,7 @@ describe('resolveEdgePointers', () => {
   it('unmapped ids are unchanged', () => {
     const edge = makeEdge('e1', 'src', 'tgt');
     const idMap = new Map<Uuid, Uuid>();
-    const [result] = resolveEdgePointers([edge], idMap);
+    const [result] = remapEdgeEndpointsToCanonical([edge], idMap);
     expect(result.sourceNodeId).toBe('src');
     expect(result.targetNodeId).toBe('tgt');
   });
@@ -188,7 +212,7 @@ describe('resolveEdgePointers', () => {
   it('does not mutate input edge', () => {
     const edge = makeEdge('e1', 'old-src', 'old-tgt');
     const idMap = new Map<Uuid, Uuid>([[u('old-src'), u('new-src')]]);
-    resolveEdgePointers([edge], idMap);
+    remapEdgeEndpointsToCanonical([edge], idMap);
     expect(edge.sourceNodeId).toBe('old-src');
   });
 });

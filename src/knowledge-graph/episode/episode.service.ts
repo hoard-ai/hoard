@@ -19,8 +19,9 @@ import { PrismaService } from '@/providers/database/postgres/prisma.service';
 
 import {
   buildDirectedIdMap,
+  CountingSemaphore,
   reassembleByOffsets,
-  resolveEdgePointers,
+  remapEdgeEndpointsToCanonical,
   withConcurrency,
 } from '../batch-utils';
 import { CommunityMaintenanceService } from '../community';
@@ -50,7 +51,13 @@ import {
   RetrieveEpisodesParamsSchema,
 } from '../types';
 import { prepareChunks } from './content-chunking';
-import { buildNodeContext, getEffectiveTypeMappings } from './episode-utils';
+import {
+  buildEdgeCorefCandidates,
+  buildNodeContext,
+  getEffectiveTypeMappings,
+  recomputeCanonicalNodesByCanonicalIdMap,
+  recomputeCorefByCanonicalIdMap,
+} from './episode-utils';
 import {
   AddEpisodeResult,
   AddJsonEpisodesOptionsInput,
@@ -118,12 +125,15 @@ export class EpisodeService {
    * legible against a real graph with real query patterns - revisit once we
    * have one. Design notes: PLAN.md.
    */
-  async deleteEpisode(id: Uuid): Promise<void> {
-    await this.deleteEpisodeImpl(id);
+  async deleteEpisode(userId: Uuid, id: Uuid): Promise<void> {
+    await this.deleteEpisodeImpl(userId, id);
   }
 
   @Span('deleteEpisode', { onResult: metricsOnResult })
-  private async deleteEpisodeImpl(id: Uuid): Promise<{ metrics: SpanMetrics }> {
+  private async deleteEpisodeImpl(
+    userId: Uuid,
+    id: Uuid,
+  ): Promise<{ metrics: SpanMetrics }> {
     const episode = await this.episodicNodeRepository.getById(id);
     if (!episode) {
       return { metrics: { 'episode.id': id, skipped: true } };
@@ -151,6 +161,15 @@ export class EpisodeService {
     // Delete episode node
     await this.episodicNodeRepository.delete(id);
 
+    // Connectivity changed around the mentioned entities; since-deleted members skip gracefully.
+    if (mentionedNodeIds.length > 0) {
+      await this.communityMaintenance.scheduleMaintenance(
+        userId,
+        episode.graphId,
+        mentionedNodeIds,
+      );
+    }
+
     return {
       metrics: {
         'episode.id': id,
@@ -164,13 +183,16 @@ export class EpisodeService {
    * TODO: For very large batches a bulk variant would be preferred over
    * sequential per-episode deletion. (graph consistency problem though)
    */
-  async deleteEpisodesById(ids: Uuid[]): Promise<void> {
-    await this.deleteEpisodesByIdImpl(ids);
+  async deleteEpisodesById(userId: Uuid, ids: Uuid[]): Promise<void> {
+    await this.deleteEpisodesByIdImpl(userId, ids);
   }
 
   @Span('deleteEpisodesById', { onResult: metricsOnResult })
-  private async deleteEpisodesByIdImpl(ids: Uuid[]): Promise<{ metrics: SpanMetrics }> {
-    await Promise.all(ids.map((id) => this.deleteEpisode(id)));
+  private async deleteEpisodesByIdImpl(
+    userId: Uuid,
+    ids: Uuid[],
+  ): Promise<{ metrics: SpanMetrics }> {
+    await Promise.all(ids.map((id) => this.deleteEpisode(userId, id)));
     return { metrics: { 'episodes.count': ids.length } };
   }
 
@@ -318,9 +340,10 @@ export class EpisodeService {
   /**
    * Batch ingestion orchestrator. Runs the pipeline as a sequence of phases that
    * thread a per-episode `EpisodeWorkItem[]` plus a graph-global `BatchState`,
-   * then assembles one `AddEpisodeResult` per input episode. Each phase carries
-   * its own span and structural-count metrics; this root span keeps the summary
-   * rollup, read off the threaded state rather than recomputed.
+   * then assembles one `AddEpisodeResult` per input episode.
+   *
+   * Phases fan out with plain `Promise.all`: LLM generations are already
+   * bounded by the distributed semaphore (README, "Concurrency & rate limiting").
    */
   @Span('addEpisodes', { onResult: metricsOnResult })
   private async addEpisodesImpl(
@@ -328,7 +351,7 @@ export class EpisodeService {
     ctx: LlmContext,
   ): Promise<{ results: AddEpisodeResult[]; metrics: SpanMetrics }> {
     const startMs = performance.now();
-    const { userId, episodes, updateCommunities } = parsed;
+    const { userId, episodes, updateCommunities, resolveCoreferences } = parsed;
 
     const cfg: PipelineConfig = {
       entityTypes: parsed.entityTypes,
@@ -339,7 +362,7 @@ export class EpisodeService {
       ),
       excludedEntityTypes: parsed.excludedEntityTypes,
       customInstructions: parsed.customInstructions,
-      updateCommunities,
+      resolveCoreferences,
     };
     // TODO: add abort on job cancellation when moving to ingestion within a job
     // See community service for implementation
@@ -365,7 +388,7 @@ export class EpisodeService {
 
     // The maintenance service routes each distinct graph to a
     // debounced full rebuild or the incremental update path based on its size.
-    const graphIds = [...new Set(items.map((it) => it.node.graphId))];
+    const graphIds = [...new Set(items.map((it) => it.episode.graphId))];
     if (updateCommunities) {
       for (const gid of graphIds) {
         const entityIds = batch.canonicalNodes
@@ -378,18 +401,27 @@ export class EpisodeService {
     }
 
     // TODO: per-entry `nodes` includes both newly-resolved canonical nodes AND
-    // existing nodes matched via cross-batch dedup. The same canonical EntityNode
+    // preexisting nodes matched via cross-batch dedup. The same canonical EntityNode
     // may therefore appear in multiple entries' `nodes` arrays - callers must
     // dedupe by id if they want a unique set across the batch.
-    const results = items.map(
-      (it): AddEpisodeResult => ({
-        episode: it.node,
+    const results = items.map((it): AddEpisodeResult => {
+      // A reference an edge extraction claimed by id is no longer unresolved.
+      const claimedRefIds = new Set(
+        it.committedCorefBindings
+          .map((b) => b.resolvedUnresolvedReferenceId)
+          .filter((id): id is Uuid => id !== null),
+      );
+      return {
+        episode: it.episode,
         nodes: it.canonicalNodes,
         edges: it.edgeResolution.resolvedEdges,
         invalidatedEdges: it.edgeResolution.invalidatedEdges,
         episodicEdges: it.episodicEdges,
-      }),
-    );
+        unresolvedReferences: it.unresolvedReferences
+          .filter((r) => !claimedRefIds.has(r.id))
+          .map(({ surfaceForm, locatingQuote }) => ({ surfaceForm, locatingQuote })),
+      };
+    });
 
     return {
       results,
@@ -397,14 +429,12 @@ export class EpisodeService {
         'user.id': ctx.userId,
         'session.id': ctx.sessionId,
         'episode.count': episodes.length,
-        'episode.ids': items.map((it) => it.node.id).join(','),
+        'episode.ids': items.map((it) => it.episode.id).join(','),
         'graph.ids': graphIds.join(','),
-        'node.count.extracted': items.reduce((s, it) => s + it.extractedNodes.length, 0),
         'node.count.canonical': batch.canonicalNodes.length,
         'node.count.new': batch.canonicalNodes.filter(
-          (n) => !batch.existingNodeIds.has(n.id),
+          (n) => !batch.preexistingGraphNodeIds.has(n.id),
         ).length,
-        'edge.count.extracted': items.reduce((s, it) => s + it.rawEdges.length, 0),
         'edge.count.resolved': items.reduce(
           (s, it) => s + it.edgeResolution.resolvedEdges.length,
           0,
@@ -465,42 +495,38 @@ export class EpisodeService {
         validAt: raw.referenceTime,
         sagaId: raw.sagaId ?? null,
       });
-      const node = raw.id ? { ...base, id: raw.id } : base;
+      const episode = raw.id ? { ...base, id: raw.id } : base;
 
       return {
-        node,
-        chunks: prepareChunks(node.content, node.source),
+        episode,
+        chunks: prepareChunks(episode.content, episode.source),
         prevEpisodes: prevEpisodesPerEpisode[i],
-        sagaId: raw.sagaId,
-        extractedNodes: [],
-        chunkIndicesByNodeId: new Map(),
-        resolution: {
-          resolvedNodes: [],
-          idMap: new Map(),
-          duplicatePairs: [],
-          candidates: [],
+
+        chunkIndicesByExtractedId: new Map(),
+        corefByExtractedId: new Map(),
+        unresolvedReferences: [],
+        nodeResolution: {
+          newNodes: [],
+          nodesMatchedToPreexistingNodes: [],
+          preexistingCandidates: [],
         },
         canonicalNodes: [],
-        rawEdges: [],
-        chunkIndicesByEdgeId: new Map(),
-        edgesFromThisEpisode: [],
-        edgeDedupe: {
-          matchedExistingEdges: [],
-          survivors: [],
-          contradictionsBySurvivorId: new Map(),
-        },
+
+        committedCorefBindings: [],
+        selfLoopFactsForEnrichment: [],
         edgeResolution: { resolvedEdges: [], invalidatedEdges: [], newEdges: [] },
+
         episodicEdges: [],
       };
     });
 
     const batch: BatchState = {
       canonicalIdByNodeId: new Map(),
-      nodeRegistry: new Map(),
-      existingNodeIds: new Set(),
+      allKnownNodesById: new Map(),
+      preexistingGraphNodeIds: new Set(),
       chunkSources: new Map(),
       canonicalNodes: [],
-      sagas: [],
+      corefByCanonicalId: new Map(),
     };
 
     return {
@@ -519,7 +545,7 @@ export class EpisodeService {
   /**
    * Phase 2 - nodes. Extracts and embeds entity nodes per episode, resolves them
    * against the live graph (pass 1) and within the batch (pass 2), and writes the
-   * canonical id map, node registry and per-item canonical node sets.
+   * canonical id map, known-node map and per-item canonical node sets.
    */
   @Span('nodesPhase', { onResult: metricsOnResult })
   private async nodesPhase(
@@ -536,120 +562,186 @@ export class EpisodeService {
         (it) => () =>
           this.nodeExtractionService.extractNodes(
             model,
-            it.node,
+            it.episode,
             it.chunks,
             it.prevEpisodes,
             cfg.entityTypes,
             cfg.customInstructions,
             cfg.excludedEntityTypes,
-            { ...ctx, metadata: { ...ctx.metadata, episodeId: it.node.id } },
+            { ...ctx, metadata: { ...ctx.metadata, episodeId: it.episode.id } },
           ),
       ),
     );
     items.forEach((it, i) => {
-      it.extractedNodes = nodeExtractions[i].nodes;
-      it.chunkIndicesByNodeId = nodeExtractions[i].chunkIndicesByNodeId;
+      it.chunkIndicesByExtractedId = nodeExtractions[i].chunkIndicesByExtractedId;
+      it.corefByExtractedId = nodeExtractions[i].corefByExtractedId;
+      it.unresolvedReferences = nodeExtractions[i].unresolvedReferences;
     });
 
-    // Embed all extracted nodes in one batched call, scatter back onto items.
-    const allExtractedNodes = items.flatMap((it) => it.extractedNodes);
+    // Embed all extracted nodes in one batched call, scatter back per episode.
+    const allExtractedNodes = nodeExtractions.flatMap((r) => r.nodes);
     const allEmbedded = await this.embeddingService.embedNodes(allExtractedNodes);
-    const embeddedPerItem = reassembleByOffsets(
+    const extractedNodesPerItem = reassembleByOffsets(
       allEmbedded,
-      items.map((it) => it.extractedNodes.length),
+      nodeExtractions.map((r) => r.nodes.length),
     );
-    items.forEach((it, i) => {
-      it.extractedNodes = embeddedPerItem[i];
-    });
 
     // Pass 1 - resolve vs live graph (parallel). resolveNodes collects its own
-    // candidates; seed the registry + existing-id set so a new node can collapse
-    // onto an existing one even when that existing one wasn't in its candidate set.
+    // candidates; seed allKnownNodesById + the preexisting-id set so a new node can collapse
+    // onto a preexisting one even when it wasn't in its candidate set.
     const resolutions = await withConcurrency(
       this.kgConfig.memoryBackpressureConcurrencyLimit,
       items.map(
-        (it) => () =>
+        (it, i) => () =>
           this.nodeResolutionService.resolveNodes(
             model,
-            it.node,
+            it.episode,
             it.chunks,
-            it.chunkIndicesByNodeId,
-            it.extractedNodes,
+            it.chunkIndicesByExtractedId,
+            extractedNodesPerItem[i],
             it.prevEpisodes,
             cfg.customInstructions,
-            { ...ctx, metadata: { ...ctx.metadata, episodeId: it.node.id } },
+            { ...ctx, metadata: { ...ctx.metadata, episodeId: it.episode.id } },
           ),
       ),
     );
     items.forEach((it, i) => {
-      it.resolution = resolutions[i];
+      it.nodeResolution = resolutions[i];
     });
 
     for (const it of items) {
-      for (const cand of it.resolution.candidates) {
-        batch.nodeRegistry.set(cand.id, cand);
-        batch.existingNodeIds.add(cand.id);
+      for (const cand of it.nodeResolution.preexistingCandidates) {
+        batch.allKnownNodesById.set(cand.id, cand);
+        batch.preexistingGraphNodeIds.add(cand.id);
       }
     }
 
-    // Pass 2 - within-batch dedup over all new nodes seeded with matched-existing.
-    const pass1Pairs: [Uuid, Uuid][] = items.flatMap((it) =>
-      it.resolution.duplicatePairs.map((p): [Uuid, Uuid] => [
-        p.extractedId,
-        p.canonicalId,
-      ]),
+    // Pass 2 - within-batch dedup over all new nodes seeded with matched-preexisting.
+    const preexistingMatchPairs: [aliasId: Uuid, canonicalId: Uuid][] = items.flatMap(
+      (it) =>
+        it.nodeResolution.nodesMatchedToPreexistingNodes.map(
+          (p): [aliasId: Uuid, canonicalId: Uuid] => [p.extractedId, p.preexistingNodeId],
+        ),
     );
-    const allNewNodes = items.flatMap((it) => it.resolution.resolvedNodes);
-    const matchedExistingIds = new Set(
-      items.flatMap((it) => it.resolution.duplicatePairs.map((p) => p.canonicalId)),
+    const allNewNodes = items.flatMap((it) => it.nodeResolution.newNodes);
+    const matchedPreexistingIds = new Set(
+      items.flatMap((it) =>
+        it.nodeResolution.nodesMatchedToPreexistingNodes.map((p) => p.preexistingNodeId),
+      ),
     );
-    const matchedExistingNodes = [...matchedExistingIds]
-      .map((id) => batch.nodeRegistry.get(id))
+    const matchedPreexistingNodes = [...matchedPreexistingIds]
+      .map((id) => batch.allKnownNodesById.get(id))
       .filter((n): n is EntityNode => n !== undefined);
 
-    const pass2Pairs = this.nodeResolutionService.dedupeAcrossBatch(
+    const withinBatchDedupePairs = this.nodeResolutionService.dedupeAcrossBatch(
       allNewNodes,
-      matchedExistingNodes,
+      matchedPreexistingNodes,
     );
 
-    batch.canonicalIdByNodeId = buildDirectedIdMap([...pass1Pairs, ...pass2Pairs]);
-    for (const n of allNewNodes) batch.nodeRegistry.set(n.id, n);
+    batch.canonicalIdByNodeId = buildDirectedIdMap([
+      ...preexistingMatchPairs,
+      ...withinBatchDedupePairs,
+    ]);
+    for (const n of allNewNodes) batch.allKnownNodesById.set(n.id, n);
 
-    // Canonical nodes per episode (own-canonical + matched-existing, deduped).
-    items.forEach((it) => {
-      const ownCanonical = it.resolution.resolvedNodes.filter(
-        (n) => (batch.canonicalIdByNodeId.get(n.id) ?? n.id) === n.id,
-      );
-      const matchedExisting = it.resolution.duplicatePairs
-        .map((p) => {
-          const canonical = batch.canonicalIdByNodeId.get(p.canonicalId) ?? p.canonicalId;
-          return batch.nodeRegistry.get(canonical);
-        })
-        .filter((n): n is EntityNode => n !== undefined);
-
-      const seen = new Set<Uuid>();
-      it.canonicalNodes = [...ownCanonical, ...matchedExisting].filter((n) => {
-        if (seen.has(n.id)) return false;
-        seen.add(n.id);
-        return true;
-      });
-    });
-
-    // Authoritative deduped union; shares object refs with items' canonicalNodes
-    // so in-place attribute/summary mutations below are visible to both.
-    batch.canonicalNodes = [
-      ...new Map(items.flatMap((it) => it.canonicalNodes).map((n) => [n.id, n])).values(),
-    ];
+    recomputeCorefByCanonicalIdMap(items, batch);
+    recomputeCanonicalNodesByCanonicalIdMap(items, batch);
 
     return {
       metrics: {
         'node.count.extracted': allExtractedNodes.length,
         'node.count.canonical': batch.canonicalNodes.length,
         'node.count.new': batch.canonicalNodes.filter(
-          (n) => !batch.existingNodeIds.has(n.id),
+          (n) => !batch.preexistingGraphNodeIds.has(n.id),
         ).length,
       },
     };
+  }
+
+  /**
+   * Folds within-episode node canonicalization pairs into the batch id map and
+   * downstream state. Example: extraction produced both a "captain" node and
+   * a "Captain Clark" node from different chunks, and the canonicalization LLM decided
+   * they are the same person - the pair is ("captain".id, "Captain Clark".id)
+   *
+   * - both new: merge as proposed;
+   * - mergedAway new, kept preexisting: merge as proposed (the phantom's chunks,
+   *   edges and descriptor route to the live node);
+   * - mergedAway preexisting, kept new: FLIP - if "captain" is already a database
+   *   row and "Captain Clark" was extracted fresh, keep the live "captain" id
+   *   (its persisted edges stay valid) but rename that node to "Captain Clark"
+   *   (re-embedded by enrichPhase's renamed-nodes pass);
+   * - both preexisting (incl. a second live row flipping onto the same kept node):
+   *   drop - a true live-node merge repoints persisted edges and deletes a row,
+   *   which is cross-episode consolidation, not batch state.
+   *   TODO: both preexisting means one entity is duplicated,
+   *   which must be addressed somehow
+   *
+   * Reads:
+   *   batch.preexistingGraphNodeIds
+   *   batch.allKnownNodesById
+   * Writes:
+   *   batch.canonicalIdByNodeId (rebuilt with the accepted pairs)
+   *   flipped live nodes' name + nameEmbedding (mutated in place)
+   *   items[].committedCorefBindings (boundNodeId remapped)
+   *   batch.corefByCanonicalId (via recomputeCorefByCanonicalId)
+   *   items[].canonicalNodes (via recomputeCanonicalNodes)
+   *   batch.canonicalNodes (via recomputeCanonicalNodes)
+   */
+  private mergeNodeCanonicalizationPairs(
+    proposed: [mergedAwayId: Uuid, keptId: Uuid][],
+    items: EpisodeWorkItem[],
+    batch: BatchState,
+  ): { applied: number; flipped: number; dropped: string[] } {
+    const pairs: [aliasId: Uuid, canonicalId: Uuid][] = [];
+    const dropped: string[] = [];
+    const flipTargetByKept = new Map<Uuid, Uuid>();
+
+    for (const [mergedAway, kept] of proposed) {
+      const mergedAwayPreexisting = batch.preexistingGraphNodeIds.has(mergedAway);
+      const keptPreexisting = batch.preexistingGraphNodeIds.has(kept);
+
+      if (mergedAwayPreexisting && (keptPreexisting || flipTargetByKept.has(kept))) {
+        dropped.push(`${mergedAway}->${kept}`);
+        continue;
+      }
+
+      if (mergedAwayPreexisting) {
+        const liveNode = batch.allKnownNodesById.get(mergedAway);
+        const newNode = batch.allKnownNodesById.get(kept);
+        if (!liveNode || !newNode) {
+          throw new Error(
+            `canonicalization fold: pair ${mergedAway} -> ${kept} references a node unknown to the batch`,
+          );
+        }
+        if (liveNode.name !== newNode.name) {
+          liveNode.name = newNode.name;
+          liveNode.nameEmbedding = null;
+        }
+        pairs.push([kept, mergedAway]);
+        flipTargetByKept.set(kept, mergedAway);
+        continue;
+      }
+      pairs.push([mergedAway, kept]);
+    }
+
+    if (pairs.length > 0) {
+      batch.canonicalIdByNodeId = buildDirectedIdMap([
+        ...batch.canonicalIdByNodeId.entries(),
+        ...pairs,
+      ]);
+      // TODO: No post-fold readers of corefByCanonicalId yet; kept consistent for deferred coref work.
+      recomputeCorefByCanonicalIdMap(items, batch);
+      recomputeCanonicalNodesByCanonicalIdMap(items, batch);
+
+      items.forEach((it) => {
+        it.committedCorefBindings = it.committedCorefBindings.map((b) => ({
+          ...b,
+          boundNodeId: batch.canonicalIdByNodeId.get(b.boundNodeId) ?? b.boundNodeId,
+        }));
+      });
+    }
+    return { applied: pairs.length, flipped: flipTargetByKept.size, dropped };
   }
 
   /**
@@ -666,58 +758,94 @@ export class EpisodeService {
     cfg: PipelineConfig,
     ctx: LlmContext,
   ): Promise<{ metrics: SpanMetrics }> {
-    // Extract edges per episode using this episode's canonical nodes.
-    const edgeExtractions = await withConcurrency(
+    // Extract edges per episode using this episode's canonical nodes, while a concurrent
+    // per-episode canonicalization pass groups duplicate nodes from different chunks
+    // Extraction sees the pre-fold node list and the endpoint remap below absorbs the difference.
+    const sharedSemaphore = new CountingSemaphore(
       this.kgConfig.memoryBackpressureConcurrencyLimit,
-      items.map(
-        (it) => () =>
-          this.edgeExtractionService.extractEdges(
+    );
+    const [edgeExtractions, canonPairsPerItem] = await Promise.all([
+      withConcurrency(
+        sharedSemaphore,
+        items.map((it) => () => {
+          return this.edgeExtractionService.extractEdges(
             model,
-            it.node,
+            it.episode,
             it.chunks,
             it.canonicalNodes,
             it.prevEpisodes,
             cfg.customInstructions,
             cfg.edgeTypes,
             cfg.effectiveEdgeTypeMappings,
-            { ...ctx, metadata: { ...ctx.metadata, episodeId: it.node.id } },
-          ),
+            cfg.resolveCoreferences ?? false,
+            cfg.resolveCoreferences ? buildEdgeCorefCandidates(it, batch) : [],
+            cfg.resolveCoreferences ? it.unresolvedReferences : [],
+            { ...ctx, metadata: { ...ctx.metadata, episodeId: it.episode.id } },
+          );
+        }),
       ),
-    );
+      withConcurrency(
+        sharedSemaphore,
+        items.map(
+          (it) => (): Promise<[mergedAwayId: Uuid, keptId: Uuid][]> =>
+            it.chunks.length > 1
+              ? this.nodeResolutionService.canonicalizeEpisodeNodes(
+                  model,
+                  it.canonicalNodes,
+                  batch.corefByCanonicalId,
+                  { ...ctx, metadata: { ...ctx.metadata, episodeId: it.episode.id } },
+                )
+              : Promise.resolve([]),
+        ),
+      ),
+    ]);
     items.forEach((it, i) => {
-      it.rawEdges = edgeExtractions[i].edges;
-      it.chunkIndicesByEdgeId = edgeExtractions[i].chunkIndicesByEdgeId;
+      it.committedCorefBindings = edgeExtractions[i].committedCorefBindings;
     });
+
+    const canonicalization = this.mergeNodeCanonicalizationPairs(
+      canonPairsPerItem.flat(),
+      items,
+      batch,
+    );
 
     // Edge chunk provenance keyed by edge id. INVARIANT: episodeIndex == the
     // item's position; every [][] view handed to the resolution service below is
     // derived from `items` in order so the indices stay aligned.
-    batch.chunkSources = new Map();
-    items.forEach((it, i) => {
-      for (const [id, indices] of it.chunkIndicesByEdgeId) {
+    edgeExtractions.forEach((extraction, i) => {
+      for (const [id, indices] of extraction.chunkIndicesByEdgeId) {
         batch.chunkSources.set(id, { episodeIndex: i, indices });
       }
     });
 
-    // Remap endpoints through node dedup, then embed all edges in one call.
-    items.forEach((it) => {
-      it.rawEdges = resolveEdgePointers(it.rawEdges, batch.canonicalIdByNodeId);
+    // Remap endpoints through node dedup (incl. the canonicalization fold),
+    // then pull self-loops - both deliberate single-entity facts from
+    // extraction and pairs whose mentions collapsed onto one entity here.
+    // They feed node enrichment as context (enrichPhase) instead of persisting
+    // as self-loop edges. Then embed the surviving edges in one call.
+    const rawEdgesPerItem = items.map((it, i) => {
+      const remapped = remapEdgeEndpointsToCanonical(
+        edgeExtractions[i].edges,
+        batch.canonicalIdByNodeId,
+      );
+      it.selfLoopFactsForEnrichment = remapped.filter(
+        (e) => e.sourceNodeId === e.targetNodeId,
+      );
+      return remapped.filter((e) => e.sourceNodeId !== e.targetNodeId);
     });
-    const allExtractedEdges = items.flatMap((it) => it.rawEdges);
+    const allExtractedEdges = rawEdgesPerItem.flat();
+
     const allEmbeddedEdges = await this.embeddingService.embedEdges(allExtractedEdges);
-    const embeddedPerItem = reassembleByOffsets(
+    const embeddedEdgesPerItem = reassembleByOffsets(
       allEmbeddedEdges,
-      items.map((it) => it.rawEdges.length),
+      rawEdgesPerItem.map((edges) => edges.length),
     );
-    items.forEach((it, i) => {
-      it.rawEdges = embeddedPerItem[i];
-    });
 
     // Cross-batch edge dedup -> flat canonical set. Mirrors `dedupe_edges_bulk`.
     const canonicalEdges = await this.edgeResolutionService.dedupeAcrossBatch(
       model,
-      items.map((it) => it.rawEdges),
-      items.map((it) => it.node),
+      embeddedEdgesPerItem,
+      items.map((it) => it.episode),
       items.map((it) => it.chunks),
       batch.chunkSources,
       items.map((it) => it.prevEpisodes),
@@ -727,12 +855,13 @@ export class EpisodeService {
 
     // Route each canonical edge to its ORIGIN episode so it is deduped exactly
     // once, against the episode whose previousEpisodes / chunks made it.
+    const edgesByOriginItem: EntityEdge[][] = items.map(() => []);
     for (const edge of canonicalEdges) {
       const source = batch.chunkSources.get(edge.id);
       if (!source) {
         throw new Error(`edge dedup partition: edge ${edge.id} has no chunk source`);
       }
-      items[source.episodeIndex].edgesFromThisEpisode.push(edge);
+      edgesByOriginItem[source.episodeIndex].push(edge);
     }
 
     // DEDUPE per origin episode (candidates collected inside dedupeEdges). No
@@ -741,71 +870,67 @@ export class EpisodeService {
     const dedupes = await withConcurrency(
       this.kgConfig.memoryBackpressureConcurrencyLimit,
       items.map(
-        (it) => () =>
+        (it, i) => () =>
           this.edgeResolutionService.dedupeEdges(
             model,
-            items.map((other) => other.node),
+            items.map((other) => other.episode),
             items.map((other) => other.chunks),
             batch.chunkSources,
-            it.edgesFromThisEpisode,
+            edgesByOriginItem[i],
             batch.canonicalIdByNodeId,
-            it.node.validAt,
+            it.episode.validAt,
             it.prevEpisodes,
             cfg.customInstructions,
-            { ...ctx, metadata: { ...ctx.metadata, episodeId: it.node.id } },
+            { ...ctx, metadata: { ...ctx.metadata, episodeId: it.episode.id } },
           ),
       ),
     );
-    items.forEach((it, i) => {
-      it.edgeDedupe = dedupes[i];
-    });
 
-    // FILL - one chunk-grounded enrichment call per surviving edge (timestamps +
-    // custom attributes), over the pooled survivors. Mutates edges in place.
-    const allSurvivors = items.flatMap((it) => it.edgeDedupe.survivors);
+    // FILL - one chunk-grounded enrichment call per new edge (timestamps +
+    // custom attributes), over the pooled new edges. Mutates edges in place.
+    const allNewEdges = dedupes.flatMap((d) => d.newEdges);
     await this.edgeExtractionService.enrichEdges(
       model,
-      allSurvivors,
+      allNewEdges,
       batch.canonicalNodes,
-      items.map((it) => it.node),
+      items.map((it) => it.episode),
       items.map((it) => it.chunks),
       batch.chunkSources,
       cfg.edgeTypes,
       cfg.effectiveEdgeTypeMappings,
+      items.map((it) => it.committedCorefBindings),
       ctx,
     );
 
-    // INVALIDATE - temporal adjudication over the now-filled survivors, global so
-    // an existing edge contradicted from two episodes is invalidated once.
+    // INVALIDATE - temporal adjudication over the now-filled new edges, global so
+    // a preexisting edge contradicted from two episodes is invalidated once.
     //
-    // TODO: only new-vs-existing-graph contradictions are adjudicated. Two
+    // TODO: only new-vs-preexisting-graph contradictions are adjudicated. Two
     // brand-new edges from different episodes in this batch that contradict each
     // other are never compared (dedupeAcrossBatch collapses duplicates but
     // ignores contradictions), so both persist. Examine with cross-graph
     // ingestion in mind - a batch may span multiple graphs, so any new-vs-new
     // pass must scope contradictions by graphId (never across graphs).
     const mergedContradictions = new Map<Uuid, EntityEdge[]>();
-    for (const it of items) {
-      for (const [id, edges] of it.edgeDedupe.contradictionsBySurvivorId) {
+    for (const dedupe of dedupes) {
+      for (const [id, edges] of dedupe.contradictionsByNewEdgeId) {
         mergedContradictions.set(id, edges);
       }
     }
-    const { invalidatedBySurvivorId } = this.edgeResolutionService.invalidateEdges(
-      allSurvivors,
+    const { invalidatedByNewEdgeId } = this.edgeResolutionService.invalidateEdges(
+      allNewEdges,
       mergedContradictions,
     );
 
-    // Reassemble the per-item EdgeResolutionResult. Each survivor belongs to one
+    // Reassemble the per-item EdgeResolutionResult. Each new edge belongs to one
     // origin episode (chunkSources), so invalidations attribute to that entry.
-    items.forEach((it) => {
+    items.forEach((it, i) => {
+      const dedupe = dedupes[i];
       it.edgeResolution = {
-        newEdges: it.edgeDedupe.survivors,
-        resolvedEdges: [
-          ...it.edgeDedupe.matchedExistingEdges,
-          ...it.edgeDedupe.survivors,
-        ],
-        invalidatedEdges: it.edgeDedupe.survivors.flatMap(
-          (s) => invalidatedBySurvivorId.get(s.id) ?? [],
+        newEdges: dedupe.newEdges,
+        resolvedEdges: [...dedupe.matchedPreexistingEdges, ...dedupe.newEdges],
+        invalidatedEdges: dedupe.newEdges.flatMap(
+          (s) => invalidatedByNewEdgeId.get(s.id) ?? [],
         ),
       };
     });
@@ -821,15 +946,24 @@ export class EpisodeService {
           (s, it) => s + it.edgeResolution.invalidatedEdges.length,
           0,
         ),
-        'edge.count.new': allSurvivors.length,
+        'edge.count.new': allNewEdges.length,
+        'canonicalization.pairs.applied': canonicalization.applied,
+        'canonicalization.pairs.flipped': canonicalization.flipped,
+        // Live-live merges deferred to cross-episode consolidation; ids kept
+        // visible so their frequency can be judged against a real graph.
+        'canonicalization.pairs.dropped': canonicalization.dropped.join(','),
+        'edge.count.selfLoopsFolded': items.reduce(
+          (s, it) => s + it.selfLoopFactsForEnrichment.length,
+          0,
+        ),
       },
     };
   }
 
   /**
    * Phase 4 - enrich. Fills entity attributes and summaries on the canonical
-   * nodes, re-embeds nodes renamed during dedup, and constructs (in memory only)
-   * the saga nodes and HAS_EPISODE edges. All DB writes happen in persistPhase.
+   * nodes and re-embeds nodes renamed during dedup. All DB writes happen in
+   * persistPhase.
    */
   @Span('enrichPhase', { onResult: metricsOnResult })
   private async enrichPhase(
@@ -841,33 +975,37 @@ export class EpisodeService {
   ): Promise<{ metrics: SpanMetrics }> {
     const allResolvedEdges = items.flatMap((it) => it.edgeResolution.resolvedEdges);
     const allNewEdges = items.flatMap((it) => it.edgeResolution.newEdges);
+    // Self-loops folded at the canonicalization remap: single-entity facts that
+    // feed enrichment context only (never deduped, filled, or persisted).
+    const foldedFacts = items.flatMap((it) => it.selfLoopFactsForEnrichment);
 
     const nodeContext = buildNodeContext(
       items.map((it) => it.canonicalNodes),
-      items.map((it) => it.chunkIndicesByNodeId),
+      items.map((it) => it.chunkIndicesByExtractedId),
       batch.canonicalIdByNodeId,
-      items.map((it) => it.node),
+      items.map((it) => it.episode),
       items.map((it) => it.prevEpisodes),
       items.map((it) => it.chunks),
+      items.map((it) => it.committedCorefBindings),
     );
 
     // Entity attributes refined from this episode's content, with resolved-edge
-    // context. Runs over the full resolved set (new + matched existing).
+    // context. Runs over the full resolved set (new + matched preexisting).
     await this.nodeExtractionService.fillEntityAttributes(
       model,
       batch.canonicalNodes,
-      allResolvedEdges,
+      [...allResolvedEdges, ...foldedFacts],
       cfg.entityTypes,
       nodeContext,
       ctx,
     );
 
     // Summaries for all canonical nodes; only NEW edges as fact context so
-    // matched-existing edges aren't re-emitted as known facts.
+    // matched-preexisting edges aren't re-emitted as known facts.
     await this.nodeExtractionService.summarizeNodes(
       model,
       batch.canonicalNodes,
-      allNewEdges,
+      [...allNewEdges, ...foldedFacts],
       cfg.entityTypes,
       nodeContext,
       ctx,
@@ -888,40 +1026,20 @@ export class EpisodeService {
       });
     }
 
-    // Saga construction (in-memory only). One Saga per distinct sagaId;
-    // the episode->saga link rides on EpisodicNode.sagaId (set at item build).
-    // Persisted in persistPhase.
-    const sagaGroups = new Map<Uuid, EpisodeWorkItem[]>();
-    for (const it of items) {
-      if (!it.sagaId) continue;
-      sagaGroups.set(it.sagaId, [...(sagaGroups.get(it.sagaId) ?? []), it]);
-    }
-    for (const [sagaId, group] of sagaGroups) {
-      // TODO: saga name defaults to the ID string. Plan: accept an optional
-      // caller-provided name, otherwise let summarizeSaga generate one.
-      batch.sagas.push(
-        createSaga({
-          id: sagaId,
-          name: NodeNameSchema.parse(sagaId),
-          graphId: group[0].node.graphId,
-        }),
-      );
-    }
-
     return {
       metrics: {
         'node.count.canonical': batch.canonicalNodes.length,
         'node.count.reEmbedded': renamedNodes.length,
         'edge.count.new': allNewEdges.length,
-        'saga.count': sagaGroups.size,
       },
     };
   }
 
   /**
-   * Phase 5 - persist. Builds the MENTIONS edges, then writes everything in
-   * FK-correct order in a single transaction: sagas first (episodic nodes
-   * FK onto them via saga_id), then entity + episodic nodes, then entity / episodic edges.
+   * Phase 5 - persist. Builds the MENTIONS edges and saga nodes, then writes
+   * everything in FK-correct order in a single transaction: sagas first
+   * (episodic nodes FK onto them via saga_id), then entity + episodic nodes,
+   * then entity / episodic edges.
    */
   @Span('persistPhase', { onResult: metricsOnResult })
   private async persistPhase(
@@ -931,12 +1049,26 @@ export class EpisodeService {
     items.forEach((it) => {
       it.episodicEdges = it.canonicalNodes.map((node) =>
         createEpisodicEdge({
-          sourceNodeId: it.node.id,
+          sourceNodeId: it.episode.id,
           targetNodeId: node.id,
-          graphId: it.node.graphId,
+          graphId: it.episode.graphId,
         }),
       );
     });
+
+    // One Saga per distinct sagaId
+    // TODO: saga name defaults to the ID string. Plan: accept an optional
+    // caller-provided name, otherwise let summarizeSaga generate one.
+    const graphIdBySagaId = new Map<Uuid, Uuid>();
+    for (const it of items) {
+      const sagaId = it.episode.sagaId;
+      if (sagaId && !graphIdBySagaId.has(sagaId)) {
+        graphIdBySagaId.set(sagaId, it.episode.graphId);
+      }
+    }
+    const sagas = [...graphIdBySagaId].map(([sagaId, graphId]) =>
+      createSaga({ id: sagaId, name: NodeNameSchema.parse(sagaId), graphId }),
+    );
     const allResolvedEdges = items.flatMap((it) => it.edgeResolution.resolvedEdges);
     const allInvalidatedEdges = items.flatMap((it) => it.edgeResolution.invalidatedEdges);
     const allEpisodicEdges = items.flatMap((it) => it.episodicEdges);
@@ -945,12 +1077,12 @@ export class EpisodeService {
     // then entity + episodic nodes, then entity / episodic edges.
     await this.prisma.$transaction(
       async (tx) => {
-        for (const saga of batch.sagas) {
+        for (const saga of sagas) {
           await this.sagaRepository.createIfNotExists(saga, tx);
         }
         await this.entityNodeRepository.saveBulk(batch.canonicalNodes, tx);
         await this.episodicNodeRepository.saveBulk(
-          items.map((it) => it.node),
+          items.map((it) => it.episode),
           tx,
         );
         await this.entityEdgeRepository.saveBulk(allResolvedEdges, tx);
@@ -967,7 +1099,7 @@ export class EpisodeService {
       metrics: {
         'node.count.persisted': batch.canonicalNodes.length,
         'episode.count': items.length,
-        'saga.count': batch.sagas.length,
+        'saga.count': sagas.length,
         'edge.count.resolved': allResolvedEdges.length,
         'edge.count.invalidated': allInvalidatedEdges.length,
       },

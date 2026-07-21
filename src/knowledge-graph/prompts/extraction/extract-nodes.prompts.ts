@@ -3,6 +3,10 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 
 import type { EntityTypeMap } from '@/knowledge-graph/episode/types';
+import {
+  EntityCorefDescriptorSchema,
+  UnresolvedReferenceSchema,
+} from '@/knowledge-graph/extraction/types';
 import type { EpisodicNode } from '@/knowledge-graph/models';
 import { EpisodeType } from '@/knowledge-graph/models';
 import { NodeNameSchema } from '@/knowledge-graph/types';
@@ -36,8 +40,14 @@ const ExtractedEntitySchema = z.object({
 
 export const ExtractedEntitiesSchema = z.object({
   extractedEntities: z
-    .array(ExtractedEntitySchema)
+    .array(ExtractedEntitySchema.extend(EntityCorefDescriptorSchema.shape))
     .describe('List of extracted entities'),
+  unresolvedReferences: z
+    .array(UnresolvedReferenceSchema)
+    .default([])
+    .describe(
+      'Referring expressions that clearly point to a specific entity but could not be tied to any extracted entity. Empty when every reference resolves.',
+    ),
 });
 
 export type ExtractedEntitiesOutput = z.infer<typeof ExtractedEntitiesSchema>;
@@ -271,15 +281,52 @@ Do NOT extract: "photo" (generic media noun), "event" (generic event noun), "gov
 </EXAMPLES>
 `;
 
+const COREFERENCE_INSTRUCTIONS = `<COREFERENCE RESOLUTION>
+In unresolvedReferences, report any referring expression in the CURRENT EPISODE - a pronoun (she, they,
+it) or a definite description (the manager, the study) - that clearly points to a specific entity but
+that you could NOT tie to one of the entities you extracted. Give its surfaceForm and a short
+locatingQuote around it. Leave the list empty when every reference resolves.
+
+Example:
+Content: The quarterly report was late, so she apologized to the board.
+Extracted entities: (none - no person or organization is named)
+unresolvedReferences: [{ "surfaceForm": "she", "locatingQuote": "she apologized to the board" }]
+
+For each extracted entity, also provide:
+- identifyingDescription: a short standalone descriptor that pins down the entity even where its name does not
+appear - its role or type plus the most distinctive facts stated here. Write it so a later reader
+holding only this descriptor could tell which entity a pronoun refers to. State gender only when the
+text itself establishes it (a pronoun, a stated fact) - NEVER inferred from the name.
+- aliases: EVERY distinctive surface form this text uses for the entity, other than pronouns.
+Include both name variants (e.g. "Dr. Osei", "Osei") AND the role or definite descriptions the
+text uses for it (e.g. "the captain", "the first officer", "the engineer", "the trawler"). This
+matters: later text may refer to the entity only by such a description, and the alias is how it
+is recognized as the same entity. Only include a description when it clearly points to this one
+entity here - skip it if it could refer to more than one.
+- referredToAsPronouns: the pronouns THIS text itself uses for the entity, in subject form
+(he, she, it, they). Observed usage only - NEVER infer a pronoun from the entity's name or type.
+Include this field only when the text uses a pronoun for the entity; omit it otherwise.
+
+Example (the coref fields for two entities):
+Content: The captain, Captain Ruiz, had no faith in the sonar. The first officer was a quiet
+Peruvian named Serrano, and he drew up the watch bill.
+- "Captain Ruiz": identifyingDescription "ship captain who distrusts the sonar", aliases ["the captain"]
+- "Serrano": identifyingDescription "first officer, a quiet Peruvian", aliases ["the first officer"], referredToAsPronouns ["he"]
+</COREFERENCE RESOLUTION>`;
+
 function buildSystemPrompt(source: EpisodeType): string {
+  let base: string;
   switch (source) {
     case EpisodeType.message:
-      return MESSAGE_SYSTEM_PROMPT;
+      base = MESSAGE_SYSTEM_PROMPT;
+      break;
     case EpisodeType.json:
-      return JSON_SYSTEM_PROMPT;
+      base = JSON_SYSTEM_PROMPT;
+      break;
     default:
-      return TEXT_SYSTEM_PROMPT;
+      base = TEXT_SYSTEM_PROMPT;
   }
+  return `${base}\n\n${COREFERENCE_INSTRUCTIONS}`;
 }
 
 export function buildExtractNodesMessages(ctx: {
@@ -322,22 +369,95 @@ ${formatCurrentEpisode(episode, { includeSource: true })}
   return [new SystemMessage(systemPrompt), new HumanMessage(humanContent)];
 }
 
+// Bare pronouns don't identify an entity, so aliases must exclude them (a
+// bare-pronoun alias seeds the recency mis-binding in known-failures Failure 1).
+// Scoped to pronoun classes that corefer to a definite entity, plus the
+// zero-collision reflexives/reciprocals. Indefinite pronouns (someone, nothing,
+// one, ...) are deliberately omitted: non-referential, and several double as
+// proper names ("One", "Nothing", "Others").
+const BARE_PRONOUNS = new Set([
+  // personal (subjective + objective)
+  'i',
+  'you',
+  'he',
+  'she',
+  'it',
+  'we',
+  'they',
+  'me',
+  'him',
+  'her',
+  'us',
+  'them',
+  // possessive (pronouns + determiners)
+  'my',
+  'mine',
+  'your',
+  'yours',
+  'his',
+  'hers',
+  'its',
+  'our',
+  'ours',
+  'their',
+  'theirs',
+  // demonstrative
+  'this',
+  'that',
+  'these',
+  'those',
+  // interrogative + relative
+  'who',
+  'whom',
+  'whose',
+  'which',
+  'what',
+  'whoever',
+  'whomever',
+  'whichever',
+  'whatever',
+  // reflexive + intensive
+  'myself',
+  'yourself',
+  'yourselves',
+  'himself',
+  'herself',
+  'itself',
+  'ourselves',
+  'themselves',
+  // reciprocal
+  'each other',
+  'one another',
+]);
+
 export function buildExtractNodesValidator(ctx: {
   entityTypes?: EntityTypeMap;
 }): (parsed: ExtractedEntitiesOutput) => Violation[] {
   const typeCount = ctx.entityTypes ? Object.keys(ctx.entityTypes).length : 0;
 
   return (parsed) => {
-    if (typeCount === 0) return [];
     const violations: Violation[] = [];
 
-    for (const e of parsed.extractedEntities) {
-      if (e.entityTypeId === undefined) continue;
-      if (e.entityTypeId < 0 || e.entityTypeId >= typeCount) {
-        violations.push({
-          code: 'extract-nodes.entity-type-id-out-of-range',
-          message: `entityTypeId ${e.entityTypeId} for "${e.name}" is out of range [0, ${typeCount})`,
-        });
+    parsed.extractedEntities.forEach((e, i) => {
+      for (const alias of e.aliases) {
+        if (BARE_PRONOUNS.has(alias.trim().toLowerCase())) {
+          violations.push({
+            code: 'extract-nodes.bare-pronoun-alias',
+            message: `extractedEntities[${i}] has a bare pronoun in aliases; aliases must exclude bare pronouns`,
+          });
+        }
+      }
+    });
+
+    if (typeCount > 0) {
+      for (const e of parsed.extractedEntities) {
+        if (e.entityTypeId === undefined) continue;
+        if (e.entityTypeId < 0 || e.entityTypeId >= typeCount) {
+          violations.push({
+            code: 'extract-nodes.entity-type-id-out-of-range',
+            message: `entityTypeId ${e.entityTypeId} for "${e.name}" is out of range [0, ${typeCount})`,
+          });
+        }
       }
     }
     return violations;

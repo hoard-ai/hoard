@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
+
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 
-import { Uuid } from '@/common/schemas';
+import { Uuid, UuidSchema } from '@/common/schemas';
 import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { invokeStructured } from '@/llm';
 import {
@@ -25,12 +27,16 @@ import {
   ExtractedEntitiesSchema,
   NodeSummarySchema,
 } from '../prompts';
+import { selectCoreferencesForChunks } from '../prompts/coref-utils';
 import { selectChunkText } from '../prompts/text-utils';
 import { NodeLabel, NodeLabels, NodeLabelSchema } from '../types';
 import {
+  type EntityCorefDescriptor,
   ExtractNodesResult,
   MAX_NODES_PER_SUMMARY_BATCH,
   type NodeEpisodeContext,
+  type TrackedUnresolvedReference,
+  type UnresolvedReference,
 } from './types';
 
 function resolveLabels(
@@ -63,7 +69,7 @@ export class NodeExtractionService {
     excludedEntityTypes?: string[],
     ctx?: LlmContext,
   ): Promise<ExtractNodesResult> {
-    const { extractedNodes, chunkIndicesByNodeId } = await this.extractNodesImpl(
+    const { metrics: _m, ...rest } = await this.extractNodesImpl(
       model,
       episode,
       chunks,
@@ -73,7 +79,7 @@ export class NodeExtractionService {
       excludedEntityTypes,
       ctx,
     );
-    return { nodes: extractedNodes, chunkIndicesByNodeId };
+    return rest;
   }
 
   @Span('extractNodes', { onResult: metricsOnResult })
@@ -82,15 +88,11 @@ export class NodeExtractionService {
     episode: EpisodicNode,
     chunks: string[],
     previousEpisodes: EpisodicNode[],
-    entityTypes?: EntityTypeMap,
-    customInstructions?: string,
-    excludedEntityTypes?: string[],
-    ctx?: LlmContext,
-  ): Promise<{
-    extractedNodes: EntityNode[];
-    chunkIndicesByNodeId: Map<Uuid, Set<number>>;
-    metrics: SpanMetrics;
-  }> {
+    entityTypes: EntityTypeMap | undefined,
+    customInstructions: string | undefined,
+    excludedEntityTypes: string[] | undefined,
+    ctx: LlmContext | undefined,
+  ): Promise<ExtractNodesResult & { metrics: SpanMetrics }> {
     const perChunk = await Promise.all(
       chunks.map((chunk) =>
         this.extractNodesFromChunk(
@@ -106,33 +108,75 @@ export class NodeExtractionService {
     );
     // Deduplicate nodes across chunks by case-insensitive name (first occurrence
     // wins). The kept node unions the chunk indices its name appeared in, so it
-    // owns every chunk it was extracted from. No-op when there's a single chunk.
+    // owns every chunk it was extracted from. Coref descriptors merge onto the
+    // kept node: union aliases + observed pronouns, keep the first
+    // identifyingDescription. No-op for a single chunk.
     const nodesByName = new Map<string, EntityNode>();
-    const chunkIndicesByNodeId = new Map<Uuid, Set<number>>();
+    const chunkIndicesByExtractedId = new Map<Uuid, Set<number>>();
+    const corefByExtractedId = new Map<Uuid, EntityCorefDescriptor>();
+    const unresolvedReferences: TrackedUnresolvedReference[] = [];
 
-    perChunk.forEach((nodes, chunkIdx) => {
-      for (const node of nodes) {
+    perChunk.forEach((chunk, chunkIdx) => {
+      for (const ref of chunk.unresolvedReferences) {
+        unresolvedReferences.push({
+          ...ref,
+          id: UuidSchema.parse(randomUUID()),
+          sourceChunkIndex: chunkIdx,
+        });
+      }
+
+      for (const node of chunk.nodes) {
         const key = node.name.toLowerCase();
         const existing = nodesByName.get(key);
+        const descriptor = chunk.corefByExtractedId.get(node.id);
 
         if (!existing) {
           nodesByName.set(key, node);
-          chunkIndicesByNodeId.set(node.id, new Set([chunkIdx]));
+          chunkIndicesByExtractedId.set(node.id, new Set([chunkIdx]));
+          if (descriptor) {
+            corefByExtractedId.set(node.id, {
+              identifyingDescription: descriptor.identifyingDescription,
+              aliases: [...descriptor.aliases],
+              referredToAsPronouns: [...descriptor.referredToAsPronouns],
+            });
+          }
         } else {
-          chunkIndicesByNodeId.get(existing.id)!.add(chunkIdx);
+          chunkIndicesByExtractedId.get(existing.id)!.add(chunkIdx);
+          if (descriptor) {
+            const kept = corefByExtractedId.get(existing.id);
+            if (kept) {
+              for (const alias of descriptor.aliases) {
+                if (!kept.aliases.includes(alias)) kept.aliases.push(alias);
+              }
+              for (const pronoun of descriptor.referredToAsPronouns) {
+                if (!kept.referredToAsPronouns.includes(pronoun)) {
+                  kept.referredToAsPronouns.push(pronoun);
+                }
+              }
+            } else {
+              corefByExtractedId.set(existing.id, {
+                identifyingDescription: descriptor.identifyingDescription,
+                aliases: [...descriptor.aliases],
+                referredToAsPronouns: [...descriptor.referredToAsPronouns],
+              });
+            }
+          }
         }
       }
     });
     const extractedNodes = [...nodesByName.values()];
 
     return {
-      extractedNodes,
-      chunkIndicesByNodeId,
+      nodes: extractedNodes,
+      chunkIndicesByExtractedId,
+      corefByExtractedId,
+      unresolvedReferences,
       metrics: {
         'episode.id': episode.id,
         'entityTypes.count': entityTypes ? Object.keys(entityTypes).length : 0,
         'chunks.count': chunks.length,
         'extracted.count': extractedNodes.length,
+        'coref.unresolved.count': unresolvedReferences.length,
       },
     };
   }
@@ -145,34 +189,48 @@ export class NodeExtractionService {
     customInstructions: string | undefined,
     excludedEntityTypes: string[] | undefined,
     ctx: LlmContext | undefined,
-  ): Promise<EntityNode[]> {
+  ): Promise<{
+    nodes: EntityNode[];
+    corefByExtractedId: Map<Uuid, EntityCorefDescriptor>;
+    unresolvedReferences: UnresolvedReference[];
+  }> {
     const messages = buildExtractNodesMessages({
       episode,
       previousEpisodes,
       entityTypes,
       customInstructions,
     });
-    const result = await invokeStructured(model, ExtractedEntitiesSchema, messages, {
+    const opts = {
       callbacks: this.llmTracer.getCallbacks(ctx),
       runName: 'extract-nodes',
       tags: ['knowledge-graph', 'extraction.node'],
       validate: buildExtractNodesValidator({ entityTypes }),
-    });
+    };
 
-    return result.extractedEntities
-      .filter((e) => e.name.trim() !== '')
-      .map((e) =>
-        createEntityNode({
-          name: e.name,
-          graphId: episode.graphId,
-          labels: resolveLabels(e.entityTypeId, entityTypes),
-        }),
-      )
-      .filter((node) => {
-        if (!excludedEntityTypes?.length) return true;
-        const specificLabel = node.labels.find((l) => l !== 'Entity') ?? 'Entity';
-        return !excludedEntityTypes.includes(specificLabel);
+    const result = await invokeStructured(model, ExtractedEntitiesSchema, messages, opts);
+    const unresolvedReferences = result.unresolvedReferences;
+
+    const corefByExtractedId = new Map<Uuid, EntityCorefDescriptor>();
+    const nodes: EntityNode[] = [];
+
+    for (const e of result.extractedEntities) {
+      const node = createEntityNode({
+        name: e.name,
+        graphId: episode.graphId,
+        labels: resolveLabels(e.entityTypeId, entityTypes),
       });
+      if (excludedEntityTypes?.length) {
+        const specificLabel = node.labels.find((l) => l !== 'Entity') ?? 'Entity';
+        if (excludedEntityTypes.includes(specificLabel)) continue;
+      }
+      nodes.push(node);
+      corefByExtractedId.set(node.id, {
+        identifyingDescription: e.identifyingDescription,
+        aliases: e.aliases,
+        referredToAsPronouns: e.referredToAsPronouns,
+      });
+    }
+    return { nodes, corefByExtractedId, unresolvedReferences };
   }
 
   async fillEntityAttributes(
@@ -208,6 +266,7 @@ export class NodeExtractionService {
     };
     if (!entityTypes) return { metrics: { ...baseMetrics, 'extracted.count': 0 } };
     const tasks: Array<() => Promise<void>> = [];
+    const nodeNameById = new Map(nodes.map((n) => [n.id, n.name]));
 
     for (const node of nodes) {
       const label = node.labels.find((l) => l !== 'Entity');
@@ -230,6 +289,12 @@ export class NodeExtractionService {
           relatedFacts: nodeEdges.map((e) => e.fact),
           referenceTime: nodeCtx.episode.validAt,
           existingAttributes: node.attributes,
+          coreferences: selectCoreferencesForChunks(
+            nodeCtx.committedCorefBindings,
+            nodeNameById,
+            nodeCtx.sourceChunkIndices,
+          ),
+          labelChunks: nodeCtx.chunks.length > 1,
         });
         const attrs = (await invokeStructured(model, entityType.schema, attrMessages, {
           callbacks: this.llmTracer.getCallbacks(ctx),
@@ -308,6 +373,7 @@ export class NodeExtractionService {
       : {};
 
     const summaryMap = new Map<string, string>();
+    const nodeNameById = new Map(nodes.map((n) => [n.id, n.name]));
     const tasks: Array<() => Promise<void>> = [];
 
     for (const {
@@ -349,6 +415,12 @@ export class NodeExtractionService {
             previousEpisodes,
             nodes: batch,
             entityTypeDescriptions,
+            coreferences: selectCoreferencesForChunks(
+              nodeContext.get(batchNodes[0].id)!.committedCorefBindings,
+              nodeNameById,
+              batchChunkIndices,
+            ),
+            labelChunks: chunks.length > 1,
           });
           const summaryResult = await invokeStructured(
             model,

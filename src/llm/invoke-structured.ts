@@ -1,5 +1,5 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { type BaseMessage, HumanMessage } from '@langchain/core/messages';
+import { AIMessage, type BaseMessage, HumanMessage } from '@langchain/core/messages';
 import { z } from 'zod';
 
 import { DEFAULT_MAX_RETRIES, type InvokeStructuredOptions } from './types';
@@ -50,19 +50,22 @@ export async function invokeStructured<S extends z.ZodType>(
     const parsed = await schema.safeParseAsync(raw);
     if (!parsed.success) {
       lastCodes = zodCodes(parsed.error);
+      // Echo the model's own rejected output back as an assistant turn so the
+      // retry can refine it rather than regenerate blind from the feedback alone.
       currentMessages = [
         ...currentMessages,
+        new AIMessage(JSON.stringify(raw, null, 2)),
         new HumanMessage(formatSchemaFeedback(parsed.error)),
       ];
       continue;
     }
-
     const violations = validate?.(parsed.data) ?? [];
     if (violations.length === 0) return parsed.data;
 
     lastCodes = violations.map((v) => v.code);
     currentMessages = [
       ...currentMessages,
+      new AIMessage(JSON.stringify(raw, null, 2)),
       new HumanMessage(formatInvariantFeedback(violations.map((v) => v.message))),
     ];
   }

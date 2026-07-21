@@ -190,9 +190,9 @@ describe('CommunityService', () => {
   afterEach(() => jest.clearAllMocks());
 
   describe('buildCommunities', () => {
-    it('returns early and deletes existing communities when graph has <2 nodes', async () => {
+    it('returns early and deletes existing communities when graph has too few nodes for a community', async () => {
       const llm = setupStructuredOutput();
-      mockEntityNodeRepo.findIdsForGraph.mockResolvedValue([u('01')]);
+      mockEntityNodeRepo.findIdsForGraph.mockResolvedValue([u('01'), u('02')]);
 
       await service.buildCommunities(KG_TEST_USER_ID, KG_TEST_GRAPH_ID);
 
@@ -205,7 +205,7 @@ describe('CommunityService', () => {
 
     it('returns early when graph has no edges', async () => {
       const llm = setupStructuredOutput();
-      mockEntityNodeRepo.findIdsForGraph.mockResolvedValue([u('01'), u('02')]);
+      mockEntityNodeRepo.findIdsForGraph.mockResolvedValue([u('01'), u('02'), u('03')]);
       mockEntityEdgeRepo.findAggregatedNeighborCounts.mockResolvedValue([]);
 
       await service.buildCommunities(KG_TEST_USER_ID, KG_TEST_GRAPH_ID);
@@ -213,6 +213,30 @@ describe('CommunityService', () => {
       expect(mockCommunityRepo.deleteByGraphId).toHaveBeenCalledWith(KG_TEST_GRAPH_ID);
       expect(llm.summarizePair).not.toHaveBeenCalled();
       expect(llm.communityName).not.toHaveBeenCalled();
+    });
+
+    it('drops clusters smaller than the minimum community size', async () => {
+      // A triangle and a disconnected pair; only the triangle survives.
+      const triangle: Uuid[] = [u('tri-a'), u('tri-b'), u('tri-c')];
+      const pair: Uuid[] = [u('pair-a'), u('pair-b')];
+      mockEntityNodeRepo.findIdsForGraph.mockResolvedValue([...triangle, ...pair].sort());
+      mockEntityEdgeRepo.findAggregatedNeighborCounts.mockResolvedValue([
+        agg(triangle[0], triangle[1], 1),
+        agg(triangle[1], triangle[2], 1),
+        agg(triangle[2], triangle[0], 1),
+        agg(pair[0], pair[1], 1),
+      ]);
+      mockEntityNodeRepo.findSummariesByIds.mockImplementation((ids: Uuid[]) =>
+        Promise.resolve(ids.map((id) => ({ id, summary: `about ${id}` }))),
+      );
+      setupStructuredOutput();
+
+      await service.buildCommunities(KG_TEST_USER_ID, KG_TEST_GRAPH_ID);
+
+      expect(mockCommunityRepo.saveBulk).toHaveBeenCalledTimes(1);
+      const saved = mockCommunityRepo.saveBulk.mock.calls[0][0];
+      expect(saved).toHaveLength(1);
+      expect(saved[0].memberIds).toEqual([...triangle].sort());
     });
 
     describe('with two communities', () => {

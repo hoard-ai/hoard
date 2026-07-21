@@ -5,7 +5,7 @@ import { LlmConfig, LlmProvider } from '@generated/prisma/client';
 
 import { Uuid } from '@/common/schemas';
 import { LlmConfigService } from '@/config/llm';
-import { setActiveSpanAttribute } from '@/observability';
+import { recordSpanEvent } from '@/observability';
 import { CryptoService } from '@/providers/crypto';
 import { PrismaService } from '@/providers/database/postgres';
 import { RateLimiterService } from '@/providers/rate-limit';
@@ -319,7 +319,11 @@ export class LlmService {
         limit,
         signal,
         () => orig(messages, nextOptions, runManager),
-        (waitMs) => setActiveSpanAttribute('ratelimit.queue_wait_ms', waitMs),
+        (waitMs) =>
+          recordSpanEvent('ratelimit.admitted', {
+            'ratelimit.key': key,
+            'ratelimit.queue_wait_ms': waitMs,
+          }),
       );
     };
     return model;

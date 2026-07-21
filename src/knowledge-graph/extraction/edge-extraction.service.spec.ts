@@ -3,7 +3,7 @@ import { mockDeep } from 'jest-mock-extended';
 import { z } from 'zod';
 
 import { NoOpLlmTracer } from '@/observability';
-import { KG_TEST_GRAPH_ID, KgEdgeFactory, KgNodeFactory } from '@/test/factories';
+import { KG_TEST_GRAPH_ID, KgEdgeFactory, KgNodeFactory, u } from '@/test/factories';
 
 import type { EdgeTypeMap, EdgeTypeMappings } from '../episode/types';
 import type { EntityEdge } from '../models';
@@ -236,6 +236,70 @@ describe('EdgeExtractionService', () => {
       edges.forEach((e) => expect(e.id).toBeTruthy());
       expect(edges[0].id).not.toBe(edges[1].id);
     });
+
+    it('maps an echoed unresolvedReferenceIdx to the reference id, null otherwise', async () => {
+      const she = {
+        id: u('unresolved-she'),
+        surfaceForm: 'she',
+        locatingQuote: 'she left',
+        sourceChunkIndex: 0,
+      };
+      mockRunnable.invoke.mockResolvedValue({
+        edges: [
+          {
+            sourceEntityIdx: 0,
+            targetEntityIdx: 2,
+            relationType: 'WORKS_AT',
+            fact: 'Alice works at Acme Corp.',
+          },
+        ],
+        usedCoreferences: [
+          {
+            surfaceForm: 'she',
+            entityIdx: 0,
+            locatingQuote: 'she works there',
+            unresolvedReferenceIdx: 0,
+          },
+          {
+            surfaceForm: 'the CEO',
+            entityIdx: 1,
+            locatingQuote: 'the CEO signed',
+            unresolvedReferenceIdx: null,
+          },
+        ],
+      });
+
+      const { committedCorefBindings } = await service.extractEdges(
+        mockModel,
+        baseEpisode,
+        [baseEpisode.content],
+        nodes,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        true, // resolveCoreferences
+        [], // corefCandidates
+        [she], // unresolvedReferences
+      );
+
+      expect(committedCorefBindings).toEqual([
+        {
+          surfaceForm: 'she',
+          boundNodeId: aliceNode.id,
+          sourceChunkIndex: 0,
+          locatingQuote: 'she works there',
+          resolvedUnresolvedReferenceId: she.id,
+        },
+        {
+          surfaceForm: 'the CEO',
+          boundNodeId: bobNode.id,
+          sourceChunkIndex: 0,
+          locatingQuote: 'the CEO signed',
+          resolvedUnresolvedReferenceId: null,
+        },
+      ]);
+    });
   });
 
   describe('enrichEdges', () => {
@@ -251,7 +315,7 @@ describe('EdgeExtractionService', () => {
     const sourcesFor = (edge: EntityEdge): EdgeChunkSources =>
       new Map([[edge.id, { episodeIndex: 0, indices: new Set([0]) }]]);
 
-    it('fills temporal bounds on an untyped survivor', async () => {
+    it('fills temporal bounds on an untyped new edge', async () => {
       const edge = makeSurvivor();
       mockRunnable.invoke.mockResolvedValue({
         validAt: '2024-01-01T00:00:00.000Z',
@@ -271,7 +335,7 @@ describe('EdgeExtractionService', () => {
       expect(edge.invalidAt).toBeNull();
     });
 
-    it('fills temporal bounds and merges custom attributes for a typed survivor', async () => {
+    it('fills temporal bounds and merges custom attributes for a typed new edge', async () => {
       const edge = makeSurvivor();
       // aliceNode/acmeNode default to the 'Entity' label, so WORKS_AT maps for
       // the [Entity, Entity] endpoint pair.
@@ -308,7 +372,7 @@ describe('EdgeExtractionService', () => {
       expect(edge.attributes).toMatchObject({ role: 'CEO' });
     });
 
-    it('throws when a survivor has no chunk source', async () => {
+    it('throws when a new edge has no chunk source', async () => {
       const edge = makeSurvivor();
       await expect(
         service.enrichEdges(

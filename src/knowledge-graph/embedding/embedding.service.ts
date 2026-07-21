@@ -9,13 +9,15 @@ import { Injectable } from '@nestjs/common';
 import { EmbeddingConfigService } from '@/config/embedding';
 import {
   metricsOnResult,
-  setActiveSpanAttribute,
+  recordSpanEvent,
   Span,
   type SpanMetrics,
 } from '@/observability';
 import { RateLimiterService } from '@/providers/rate-limit';
 
 import { EntityEdge, EntityNode } from '../models';
+
+const RATE_LIMIT_KEY = 'embedding';
 
 @Injectable()
 export class EmbeddingService {
@@ -54,7 +56,7 @@ export class EmbeddingService {
   // very large `texts` array may exceed it
   private async embed(texts: string[]): Promise<number[][]> {
     return this.rateLimiter.schedule(
-      'embedding',
+      RATE_LIMIT_KEY,
       this.concurrencyLimit,
       undefined,
       async () => {
@@ -78,7 +80,11 @@ export class EmbeddingService {
           return e.values;
         });
       },
-      (waitMs) => setActiveSpanAttribute('ratelimit.queue_wait_ms', waitMs),
+      (waitMs) =>
+        recordSpanEvent('ratelimit.admitted', {
+          'ratelimit.key': RATE_LIMIT_KEY,
+          'ratelimit.queue_wait_ms': waitMs,
+        }),
     );
   }
 

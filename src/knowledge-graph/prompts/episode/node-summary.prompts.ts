@@ -6,6 +6,7 @@ import type { EpisodicNode } from '@/knowledge-graph/models';
 import { NodeNameSchema } from '@/knowledge-graph/types';
 import type { Violation } from '@/llm';
 
+import { buildCoreferenceBlock, type CorefChunkGroup } from '../coref-utils';
 import {
   formatCurrentEpisode,
   formatPreviousEpisodes,
@@ -147,8 +148,17 @@ export function buildNodeSummaryMessages(ctx: {
     facts: string[];
   }>;
   entityTypeDescriptions?: Record<string, string>;
+  coreferences?: CorefChunkGroup[];
+  labelChunks?: boolean;
 }): BaseMessage[] {
-  const { episode, previousEpisodes, nodes, entityTypeDescriptions } = ctx;
+  const {
+    episode,
+    previousEpisodes,
+    nodes,
+    entityTypeDescriptions,
+    coreferences,
+    labelChunks,
+  } = ctx;
 
   const previousEpisodesText = formatPreviousEpisodes(previousEpisodes);
 
@@ -175,6 +185,13 @@ ${formatCurrentEpisode(episode)}
       .map(([label, description]) => `- ${label}: ${description}`)
       .join('\n');
     humanContent += `\n\n<ENTITY TYPE DESCRIPTIONS>\n${descriptionsText}\n</ENTITY TYPE DESCRIPTIONS>`;
+  }
+
+  const corefBlock = coreferences?.length
+    ? buildCoreferenceBlock({ committed: coreferences, labelChunks })
+    : null;
+  if (corefBlock) {
+    humanContent += `\n\n${corefBlock}\n\nThe COREFERENCES above were resolved during extraction; each applies where its quoted occurrence appears in the text.`;
   }
 
   humanContent += `\n\n<ENTITIES>\n${entitiesText}\n</ENTITIES>`;

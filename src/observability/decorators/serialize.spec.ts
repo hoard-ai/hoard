@@ -60,6 +60,50 @@ describe('safeStringify', () => {
     });
   });
 
+  describe('Maps and Sets', () => {
+    it('renders a string-keyed Map as a plain object', () => {
+      const map = new Map([
+        ['a', 1],
+        ['b', 2],
+      ]);
+      expect(safeStringify({ map })).toBe('{"map":{"a":1,"b":2}}');
+    });
+
+    it('renders a non-string-keyed Map as entry pairs', () => {
+      const map = new Map([[['Entity', 'Entity'], ['WORKS_AT']]]);
+      expect(safeStringify(map)).toBe('[[["Entity","Entity"],["WORKS_AT"]]]');
+    });
+
+    it('renders a Set as an array', () => {
+      expect(safeStringify(new Set(['x', 'y']))).toBe('["x","y"]');
+    });
+
+    it('collapses a Map at the array threshold to <oversized_map:N>', () => {
+      const map = new Map(Array.from({ length: 64 }, (_, i) => [`k${i}`, i]));
+      expect(safeStringify({ map })).toBe('{"map":"<oversized_map:64>"}');
+    });
+
+    it('collapses a Set at the array threshold to <oversized_set:N>', () => {
+      const set = new Set(Array.from({ length: 64 }, (_, i) => i));
+      expect(safeStringify({ set })).toBe('{"set":"<oversized_set:64>"}');
+    });
+
+    it('applies nested rules inside converted Map values (embedding arrays still collapse)', () => {
+      const map = new Map([
+        ['node', { nameEmbedding: Array.from({ length: 768 }, () => 0.1) }],
+      ]);
+      expect(safeStringify(map)).toBe(
+        '{"node":{"nameEmbedding":"<oversized_array:768>"}}',
+      );
+    });
+
+    it('guards cycles through a Map', () => {
+      const map = new Map<string, unknown>();
+      map.set('self', map);
+      expect(safeStringify(map)).toBe('{"self":"<cycle>"}');
+    });
+  });
+
   describe('cycles', () => {
     it('replaces direct self-cycles with <cycle> instead of losing the whole payload', () => {
       type Cyclic = { a: number; self?: Cyclic };

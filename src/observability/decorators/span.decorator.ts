@@ -9,17 +9,18 @@
 import { type Span as ApiSpan, SpanStatusCode, trace } from '@opentelemetry/api';
 import 'reflect-metadata';
 
-import { isLangfuseEnabled } from '../observability-utils';
+import {
+  isLangfuseEnabled,
+  OBSERVATION_INPUT_ATTR,
+  OBSERVATION_OUTPUT_ATTR,
+  OBSERVATION_TYPE_ATTR,
+  TRACE_INPUT_ATTR,
+  TRACE_NAME_ATTR,
+  TRACE_OUTPUT_ATTR,
+  TRACER_NAME,
+} from '../observability-utils';
 import type { ExtendedSpanOptions, ObservationKind } from '../types';
 import { safeStringify } from './serialize';
-
-const TRACER_NAME = 'hoard';
-
-const OBSERVATION_TYPE_ATTR = 'langfuse.observation.type';
-const OBSERVATION_INPUT_ATTR = 'langfuse.observation.input';
-const OBSERVATION_OUTPUT_ATTR = 'langfuse.observation.output';
-const TRACE_INPUT_ATTR = 'langfuse.trace.input';
-const TRACE_OUTPUT_ATTR = 'langfuse.trace.output';
 
 const kindAttribute = (kind: ObservationKind | undefined): string | undefined =>
   kind && kind !== 'span' ? kind : undefined;
@@ -102,7 +103,7 @@ export function Span<TArgs extends unknown[], TReturn>(
 
       return tracer.startActiveSpan(name, otelOptions, (span): unknown => {
         if (asLangfuseTrace) {
-          span.setAttribute('langfuse.trace.name', name);
+          span.setAttribute(TRACE_NAME_ATTR, name);
         }
         const kindAttr = kindAttribute(observationKind);
         if (kindAttr) {

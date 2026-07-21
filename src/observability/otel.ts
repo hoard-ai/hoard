@@ -13,11 +13,14 @@ import { PrismaInstrumentation } from '@prisma/instrumentation';
 import { parseLangfuseConfig } from '@/config/langfuse';
 import { parseOtelConfig } from '@/config/otel';
 
-import { setLangfuseEnabled } from './observability-utils';
+import {
+  OBSERVATION_LEVEL_ATTR,
+  setLangfuseEnabled,
+  TRACER_NAME,
+} from './observability-utils';
 
-const HOARD_SCOPE = 'hoard';
+const HOARD_SCOPE = TRACER_NAME;
 const PRISMA_SCOPE = 'prisma';
-const OBSERVATION_LEVEL_ATTR = 'langfuse.observation.level';
 
 /**
  * Ref-counts in-flight `hoard` spans per trace id so `shouldExportSpan`

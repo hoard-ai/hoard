@@ -17,6 +17,7 @@ import { AgentService } from './agent.service';
 const TestIngestSchema = z.object({
   name: z.string().min(1),
   content: z.string().min(1),
+  resolveCoreferences: z.boolean(),
 });
 class TestIngestDto extends createZodDto(TestIngestSchema) {}
 
@@ -60,6 +61,7 @@ export class AgentController {
         },
       ],
       updateCommunities: true,
+      resolveCoreferences: body.resolveCoreferences,
     });
 
     return {
@@ -78,6 +80,7 @@ export class AgentController {
         invalidAt: e.invalidAt?.toISOString() ?? null,
       })),
       invalidatedEdgeCount: result.invalidatedEdges.length,
+      unresolvedReferences: result.unresolvedReferences,
     };
   }
 
