@@ -280,4 +280,7 @@ export interface BatchState {
   chunkSources: EdgeChunkSources;
   canonicalNodes: EntityNode[]; // authoritative deduped union; same refs as items[].canonicalNodes
   corefByCanonicalId: Map<Uuid, EntityCorefDescriptor>;
+  // Per new edge, the preexisting edges it contradicts. Produced by edgesPhase
+  // (dedupe), consumed by enrichPhase's invalidation after FILL stamps bounds.
+  contradictionsByNewEdgeId: Map<Uuid, EntityEdge[]>;
 }

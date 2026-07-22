@@ -76,6 +76,8 @@ export class AgentController {
         id: e.id,
         name: e.name,
         fact: e.fact,
+        sourceNodeId: e.sourceNodeId,
+        targetNodeId: e.targetNodeId,
         validAt: e.validAt?.toISOString() ?? null,
         invalidAt: e.invalidAt?.toISOString() ?? null,
       })),

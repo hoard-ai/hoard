@@ -148,9 +148,9 @@ describe('coref-utils', () => {
         { surfaceForm: 'she', locatingQuote: 'she found a second colony' },
         { surfaceForm: 'the manager', locatingQuote: 'the manager signed off' },
       ]);
-      expect(block).toContain('refIdx 0: "she"');
+      expect(block).toContain('unresolvedReferenceIdx 0: "she"');
       expect(block).toContain('she found a second colony');
-      expect(block).toContain('refIdx 1: "the manager"');
+      expect(block).toContain('unresolvedReferenceIdx 1: "the manager"');
       expect(block).toContain('unresolvedReferenceIdx');
     });
   });

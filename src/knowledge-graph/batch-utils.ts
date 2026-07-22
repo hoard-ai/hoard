@@ -66,15 +66,6 @@ export async function withConcurrency<T>(
   );
 }
 
-export function reassembleByOffsets<T>(flat: T[], lengths: number[]): T[][] {
-  let offset = 0;
-  return lengths.map((len) => {
-    const slice = flat.slice(offset, offset + len);
-    offset += len;
-    return slice;
-  });
-}
-
 /**
  * Union-Find (disjoint set) with iterative path compression.
  * When merging two roots, the lexicographically larger root is attached under

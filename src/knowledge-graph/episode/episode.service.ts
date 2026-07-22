@@ -20,7 +20,6 @@ import { PrismaService } from '@/providers/database/postgres/prisma.service';
 import {
   buildDirectedIdMap,
   CountingSemaphore,
-  reassembleByOffsets,
   remapEdgeEndpointsToCanonical,
   withConcurrency,
 } from '../batch-utils';
@@ -527,6 +526,7 @@ export class EpisodeService {
       chunkSources: new Map(),
       canonicalNodes: [],
       corefByCanonicalId: new Map(),
+      contradictionsByNewEdgeId: new Map(),
     };
 
     return {
@@ -578,13 +578,10 @@ export class EpisodeService {
       it.unresolvedReferences = nodeExtractions[i].unresolvedReferences;
     });
 
-    // Embed all extracted nodes in one batched call, scatter back per episode.
-    const allExtractedNodes = nodeExtractions.flatMap((r) => r.nodes);
-    const allEmbedded = await this.embeddingService.embedNodes(allExtractedNodes);
-    const extractedNodesPerItem = reassembleByOffsets(
-      allEmbedded,
-      nodeExtractions.map((r) => r.nodes.length),
-    );
+    // Embed all extracted nodes in one batched call; embedNodes fills
+    // nameEmbedding in place, so each extraction's node list is already embedded.
+    await this.embeddingService.embedNodes(nodeExtractions.flatMap((r) => r.nodes));
+    const extractedNodesPerItem = nodeExtractions.map((r) => r.nodes);
 
     // Pass 1 - resolve vs live graph (parallel). resolveNodes collects its own
     // candidates; seed allKnownNodesById + the preexisting-id set so a new node can collapse
@@ -649,7 +646,7 @@ export class EpisodeService {
 
     return {
       metrics: {
-        'node.count.extracted': allExtractedNodes.length,
+        'node.count.extracted': nodeExtractions.reduce((s, r) => s + r.nodes.length, 0),
         'node.count.canonical': batch.canonicalNodes.length,
         'node.count.new': batch.canonicalNodes.filter(
           (n) => !batch.preexistingGraphNodeIds.has(n.id),
@@ -746,9 +743,10 @@ export class EpisodeService {
 
   /**
    * Phase 3 - edges. Extracts and embeds edges per episode against the canonical
-   * nodes, dedupes across the batch, routes each canonical edge back to its origin
-   * episode for resolution, then fills attributes / timestamp fallbacks on the
-   * freshly extracted (new) edges only.
+   * nodes, dedupes across the batch, then routes each canonical edge back to its
+   * origin episode to resolve identity (new vs matched-preexisting) and record
+   * contradictions. FILL (timestamps + attributes) and temporal invalidation run
+   * later in enrichPhase, concurrently with node enrichment.
    */
   @Span('edgesPhase', { onResult: metricsOnResult })
   private async edgesPhase(
@@ -835,11 +833,9 @@ export class EpisodeService {
     });
     const allExtractedEdges = rawEdgesPerItem.flat();
 
-    const allEmbeddedEdges = await this.embeddingService.embedEdges(allExtractedEdges);
-    const embeddedEdgesPerItem = reassembleByOffsets(
-      allEmbeddedEdges,
-      rawEdgesPerItem.map((edges) => edges.length),
-    );
+    // embedEdges fills factEmbedding in place
+    await this.embeddingService.embedEdges(allExtractedEdges);
+    const embeddedEdgesPerItem = rawEdgesPerItem;
 
     // Cross-batch edge dedup -> flat canonical set. Mirrors `dedupe_edges_bulk`.
     const canonicalEdges = await this.edgeResolutionService.dedupeAcrossBatch(
@@ -850,6 +846,7 @@ export class EpisodeService {
       batch.chunkSources,
       items.map((it) => it.prevEpisodes),
       cfg.customInstructions,
+      sharedSemaphore,
       ctx,
     );
 
@@ -886,24 +883,20 @@ export class EpisodeService {
       ),
     );
 
-    // FILL - one chunk-grounded enrichment call per new edge (timestamps +
-    // custom attributes), over the pooled new edges. Mutates edges in place.
-    const allNewEdges = dedupes.flatMap((d) => d.newEdges);
-    await this.edgeExtractionService.enrichEdges(
-      model,
-      allNewEdges,
-      batch.canonicalNodes,
-      items.map((it) => it.episode),
-      items.map((it) => it.chunks),
-      batch.chunkSources,
-      cfg.edgeTypes,
-      cfg.effectiveEdgeTypeMappings,
-      items.map((it) => it.committedCorefBindings),
-      ctx,
-    );
+    // Identity only: assemble each item's resolved/new edge sets. FILL (timestamps
+    // + attributes) and temporal INVALIDATE move to enrichPhase, where the edge
+    // FILL runs concurrently with node enrichment under one shared budget.
+    items.forEach((it, i) => {
+      const dedupe = dedupes[i];
+      it.edgeResolution = {
+        newEdges: dedupe.newEdges,
+        resolvedEdges: [...dedupe.matchedPreexistingEdges, ...dedupe.newEdges],
+        invalidatedEdges: [],
+      };
+    });
 
-    // INVALIDATE - temporal adjudication over the now-filled new edges, global so
-    // a preexisting edge contradicted from two episodes is invalidated once.
+    // Merge per-episode contradictions once for enrichPhase's global adjudication
+    // (a preexisting edge contradicted from two episodes is invalidated once).
     //
     // TODO: only new-vs-preexisting-graph contradictions are adjudicated. Two
     // brand-new edges from different episodes in this batch that contradict each
@@ -911,29 +904,11 @@ export class EpisodeService {
     // ignores contradictions), so both persist. Examine with cross-graph
     // ingestion in mind - a batch may span multiple graphs, so any new-vs-new
     // pass must scope contradictions by graphId (never across graphs).
-    const mergedContradictions = new Map<Uuid, EntityEdge[]>();
     for (const dedupe of dedupes) {
       for (const [id, edges] of dedupe.contradictionsByNewEdgeId) {
-        mergedContradictions.set(id, edges);
+        batch.contradictionsByNewEdgeId.set(id, edges);
       }
     }
-    const { invalidatedByNewEdgeId } = this.edgeResolutionService.invalidateEdges(
-      allNewEdges,
-      mergedContradictions,
-    );
-
-    // Reassemble the per-item EdgeResolutionResult. Each new edge belongs to one
-    // origin episode (chunkSources), so invalidations attribute to that entry.
-    items.forEach((it, i) => {
-      const dedupe = dedupes[i];
-      it.edgeResolution = {
-        newEdges: dedupe.newEdges,
-        resolvedEdges: [...dedupe.matchedPreexistingEdges, ...dedupe.newEdges],
-        invalidatedEdges: dedupe.newEdges.flatMap(
-          (s) => invalidatedByNewEdgeId.get(s.id) ?? [],
-        ),
-      };
-    });
 
     return {
       metrics: {
@@ -942,11 +917,10 @@ export class EpisodeService {
           (s, it) => s + it.edgeResolution.resolvedEdges.length,
           0,
         ),
-        'edge.count.invalidated': items.reduce(
-          (s, it) => s + it.edgeResolution.invalidatedEdges.length,
+        'edge.count.new': items.reduce(
+          (s, it) => s + it.edgeResolution.newEdges.length,
           0,
         ),
-        'edge.count.new': allNewEdges.length,
         'canonicalization.pairs.applied': canonicalization.applied,
         'canonicalization.pairs.flipped': canonicalization.flipped,
         // Live-live merges deferred to cross-episode consolidation; ids kept
@@ -961,9 +935,10 @@ export class EpisodeService {
   }
 
   /**
-   * Phase 4 - enrich. Fills entity attributes and summaries on the canonical
-   * nodes and re-embeds nodes renamed during dedup. All DB writes happen in
-   * persistPhase.
+   * Phase 4 - enrich. Fills entity attributes, summaries, re-embeds renamed
+   * nodes, and FILLs edge timestamps + attributes - four independent writes to
+   * disjoint fields on shared objects, run concurrently under one shared
+   * backpressure budget. Temporal invalidation runs after, over the now-filled edge bounds.
    */
   @Span('enrichPhase', { onResult: metricsOnResult })
   private async enrichPhase(
@@ -975,8 +950,6 @@ export class EpisodeService {
   ): Promise<{ metrics: SpanMetrics }> {
     const allResolvedEdges = items.flatMap((it) => it.edgeResolution.resolvedEdges);
     const allNewEdges = items.flatMap((it) => it.edgeResolution.newEdges);
-    // Self-loops folded at the canonicalization remap: single-entity facts that
-    // feed enrichment context only (never deduped, filled, or persisted).
     const foldedFacts = items.flatMap((it) => it.selfLoopFactsForEnrichment);
 
     const nodeContext = buildNodeContext(
@@ -988,49 +961,74 @@ export class EpisodeService {
       items.map((it) => it.chunks),
       items.map((it) => it.committedCorefBindings),
     );
-
-    // Entity attributes refined from this episode's content, with resolved-edge
-    // context. Runs over the full resolved set (new + matched preexisting).
-    await this.nodeExtractionService.fillEntityAttributes(
-      model,
-      batch.canonicalNodes,
-      [...allResolvedEdges, ...foldedFacts],
-      cfg.entityTypes,
-      nodeContext,
-      ctx,
-    );
-
-    // Summaries for all canonical nodes; only NEW edges as fact context so
-    // matched-preexisting edges aren't re-emitted as known facts.
-    await this.nodeExtractionService.summarizeNodes(
-      model,
-      batch.canonicalNodes,
-      [...allNewEdges, ...foldedFacts],
-      cfg.entityTypes,
-      nodeContext,
-      ctx,
-    );
-
-    // Re-embed nodes renamed during dedup (resolution rewrites name + nulls the
-    // stale nameEmbedding). Write fresh objects back by id into BOTH the batch
-    // set and each item's canonicalNodes so persistence and the result agree.
     const renamedNodes = batch.canonicalNodes.filter((n) => n.nameEmbedding === null);
-    if (renamedNodes.length > 0) {
-      const reEmbedded = await this.embeddingService.embedNodes(renamedNodes);
-      const byId = new Map(reEmbedded.map((n) => [n.id, n]));
-      const replace = (nodes: EntityNode[]) => nodes.map((n) => byId.get(n.id) ?? n);
 
-      batch.canonicalNodes = replace(batch.canonicalNodes);
-      items.forEach((it) => {
-        it.canonicalNodes = replace(it.canonicalNodes);
-      });
-    }
+    const sharedSemaphore = new CountingSemaphore(
+      this.kgConfig.memoryBackpressureConcurrencyLimit,
+    );
+    await Promise.all([
+      // FILL attributes over the full resolved set (new + matched preexisting).
+      this.nodeExtractionService.fillEntityAttributes(
+        model,
+        batch.canonicalNodes,
+        [...allResolvedEdges, ...foldedFacts],
+        cfg.entityTypes,
+        nodeContext,
+        sharedSemaphore,
+        ctx,
+      ),
+      // SUMMARIZE from NEW edges only; prior facts persist via existingSummary.
+      this.nodeExtractionService.summarizeNodes(
+        model,
+        batch.canonicalNodes,
+        [...allNewEdges, ...foldedFacts],
+        cfg.entityTypes,
+        nodeContext,
+        sharedSemaphore,
+        ctx,
+      ),
+      // EMBED nodes renamed during dedup (refill the nulled nameEmbedding).
+      renamedNodes.length > 0
+        ? this.embeddingService.embedNodes(renamedNodes)
+        : Promise.resolve(),
+      // FILL edge timestamps + attributes in place on the new edges.
+      this.edgeExtractionService.enrichEdges(
+        model,
+        allNewEdges,
+        batch.canonicalNodes,
+        items.map((it) => it.episode),
+        items.map((it) => it.chunks),
+        batch.chunkSources,
+        cfg.edgeTypes,
+        cfg.effectiveEdgeTypeMappings,
+        items.map((it) => it.committedCorefBindings),
+        sharedSemaphore,
+        ctx,
+      ),
+    ]);
+
+    // Temporal invalidation over the now-filled edges (pure compute). Global so a
+    // preexisting edge contradicted from two episodes is invalidated once; each
+    // new edge belongs to one origin episode, so invalidations attribute back to
+    // that item's edgeResolution.
+    const { invalidatedByNewEdgeId } = this.edgeResolutionService.invalidateEdges(
+      allNewEdges,
+      batch.contradictionsByNewEdgeId,
+    );
+    let invalidatedCount = 0;
+    items.forEach((it) => {
+      it.edgeResolution.invalidatedEdges = it.edgeResolution.newEdges.flatMap(
+        (s) => invalidatedByNewEdgeId.get(s.id) ?? [],
+      );
+      invalidatedCount += it.edgeResolution.invalidatedEdges.length;
+    });
 
     return {
       metrics: {
         'node.count.canonical': batch.canonicalNodes.length,
         'node.count.reEmbedded': renamedNodes.length,
         'edge.count.new': allNewEdges.length,
+        'edge.count.invalidated': invalidatedCount,
       },
     };
   }
@@ -1094,7 +1092,6 @@ export class EpisodeService {
         maxWait: PERSIST_TRANSACTION_MAX_WAIT_MS,
       },
     );
-
     return {
       metrics: {
         'node.count.persisted': batch.canonicalNodes.length,

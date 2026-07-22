@@ -5,7 +5,6 @@ import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
 
 import type { Uuid } from '@/common';
-import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { LLM_TRACER, NoOpLlmTracer } from '@/observability';
 import {
   KG_HIGH_SIM_EMBEDDING,
@@ -59,10 +58,6 @@ describe('EdgeResolutionService', () => {
       providers: [
         EdgeResolutionService,
         { provide: LLM_TRACER, useValue: new NoOpLlmTracer() },
-        {
-          provide: KnowledgeGraphConfigService,
-          useValue: { memoryBackpressureConcurrencyLimit: 10 },
-        },
       ],
     })
       .useMocker(createMock)

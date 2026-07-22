@@ -61,15 +61,34 @@ schema includes an "attributes" object, its typed attribute values. You output s
 specified by the response schema - no reasoning, no explanation, no commentary in any field.
 
 TEMPORAL RULES:
-- Determine when the fact became true (validAt) and when it stopped being true (invalidAt).
-- Resolve relative expressions ("last week", "2 years ago", "yesterday") using REFERENCE TIME.
-- If the fact is ongoing (present tense), set validAt to REFERENCE TIME.
+- validAt is when the fact BECAME TRUE and invalidAt when it stopped. Date them from the FACT and
+  CURRENT EPISODE.
+- If the CURRENT EPISODE states a specific date, year, or season (e.g. "the spring of 2021"), 
+  that is the timeframe; if it states none and reports the present, 
+  the timeframe is REFERENCE TIME. Anchor to the timeframe - do not use REFERENCE TIME
+  when the episode gives its own date.
+- An ongoing / present-tense fact became true within that timeframe: set validAt to the
+  timeframe's date. Grammatical tense is not itself a date - the FACT is a paraphrase and does not
+  preserve tense reliably, so a present-tense fact in a 2021 narrative still became true in 2021,
+  while the same fact in an undated present-tense message became true at REFERENCE TIME.
+- Resolve a relative expression against the timeframe: count "the following year", "eighteen
+  months later", "ten years earlier" from the narrative's stated date; use REFERENCE TIME and the
+  TIME REFERENCE table only when the timeframe IS REFERENCE TIME ("last week", "yesterday").
 - If a change or end is expressed, set invalidAt to the relevant time.
-- Leave a bound null if no time is stated or resolvable.
+- Leave a bound null only when the fact is not ongoing and no time is stated or resolvable.
 - If only a date is mentioned (no time), assume 00:00:00.
 - If only a year is mentioned, use January 1st at 00:00:00.
 - Use ISO 8601 with "Z" suffix (UTC), e.g. 2025-04-30T00:00:00Z.
 - NEVER hallucinate or infer dates from unrelated events.
+
+TEMPORAL EXAMPLES:
+- CURRENT EPISODE narrates "in the spring of 2019 the lab opened ... the following year it doubled
+  its staff." FACT "the lab doubled its staff" -> validAt 2020-01-01, counted from the narrative's
+  2019, NOT REFERENCE TIME.
+- The same 2019 narrative states an ongoing fact in the present tense ("Dana leads the lab") ->
+  validAt is the 2019 timeframe; present tense alone is not a date.
+- CURRENT EPISODE has no stated date and reports the present ("I just started at Acme") -> validAt
+  is REFERENCE TIME, the moment the fact is observed true.
 
 ATTRIBUTE RULES (apply only when the response schema includes an "attributes" object):
 HARD RULES - violating any of these is a failure:
@@ -186,7 +205,9 @@ export function buildTimeReferenceTable(referenceTime: Date): string {
   ];
 
   return `<TIME REFERENCE>
-Calendar facts and exact ISO 8601 values derived from REFERENCE TIME. Use these to resolve relative expressions instead of computing dates yourself; month offsets are clamped to the last valid day of the target month. Week starts Monday.
+Calendar facts and exact ISO 8601 values derived from REFERENCE TIME. 
+When the TEMPORAL RULES call for anchoring to REFERENCE TIME, use these instead of computing dates yourself; 
+month offsets are clamped to the last valid day of the target month. Week starts Monday.
 
 Facts:
 ${facts.join('\n')}

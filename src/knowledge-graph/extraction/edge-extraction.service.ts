@@ -13,6 +13,7 @@ import {
   type SpanMetrics,
 } from '@/observability';
 
+import { CountingSemaphore, withConcurrency } from '../batch-utils';
 import { getApplicableEdgeTypes } from '../episode/episode-utils';
 import type { EdgeTypeMap, EdgeTypeMappings } from '../episode/types';
 import { createEntityEdge, EntityEdge, EntityNode, type EpisodicNode } from '../models';
@@ -224,6 +225,7 @@ export class EdgeExtractionService {
     edgeTypes?: EdgeTypeMap,
     edgeTypeMappings?: EdgeTypeMappings,
     committedCorefBindingsPerEpisode: CommittedCorefBinding[][] = [],
+    concurrency?: CountingSemaphore,
     ctx?: LlmContext,
   ): Promise<void> {
     await this.enrichEdgesImpl(
@@ -236,6 +238,7 @@ export class EdgeExtractionService {
       edgeTypes,
       edgeTypeMappings,
       committedCorefBindingsPerEpisode,
+      concurrency,
       ctx,
     );
   }
@@ -251,82 +254,84 @@ export class EdgeExtractionService {
     edgeTypes: EdgeTypeMap | undefined,
     edgeTypeMappings: EdgeTypeMappings | undefined,
     committedCorefBindingsPerEpisode: CommittedCorefBinding[][],
+    concurrency: CountingSemaphore | undefined,
     ctx: LlmContext | undefined,
   ): Promise<{ metrics: SpanMetrics }> {
     const idToNode = new Map<Uuid, EntityNode>(canonicalNodes.map((n) => [n.id, n]));
     const nodeNameById = new Map(canonicalNodes.map((n) => [n.id, n.name]));
     let typedCount = 0;
 
-    await Promise.all(
-      newEdges.map(async (edge) => {
-        const source = chunkSources.get(edge.id);
-        if (!source) {
+    const tasks = newEdges.map((edge) => async () => {
+      const source = chunkSources.get(edge.id);
+      if (!source) {
+        throw new Error(`enrichEdges: edge ${edge.id} has no originating chunk indices`);
+      }
+      const episode: EpisodicNode = {
+        ...episodes[source.episodeIndex],
+        content: selectChunkText(source.indices, chunksPerEpisode[source.episodeIndex]),
+      };
+      const referenceTime = episodes[source.episodeIndex].validAt;
+      const coreferences = selectCoreferencesForChunks(
+        committedCorefBindingsPerEpisode[source.episodeIndex] ?? [],
+        nodeNameById,
+        source.indices,
+      );
+
+      // Custom fact-type schema, when the edge's relation maps to one for its
+      // endpoint labels. Untyped edges get temporal-only enrichment.
+      let customSchema: z.ZodType | undefined = undefined;
+      if (edgeTypes && edgeTypeMappings) {
+        const src = idToNode.get(edge.sourceNodeId);
+        const tgt = idToNode.get(edge.targetNodeId);
+        if (!src || !tgt) {
           throw new Error(
-            `enrichEdges: edge ${edge.id} has no originating chunk indices`,
+            `enrichEdges: edge ${edge.id} endpoint missing from canonical nodes`,
           );
         }
-        const episode: EpisodicNode = {
-          ...episodes[source.episodeIndex],
-          content: selectChunkText(source.indices, chunksPerEpisode[source.episodeIndex]),
-        };
-        const referenceTime = episodes[source.episodeIndex].validAt;
-        const coreferences = selectCoreferencesForChunks(
-          committedCorefBindingsPerEpisode[source.episodeIndex] ?? [],
-          nodeNameById,
-          source.indices,
+        const applicable = getApplicableEdgeTypes(
+          src.labels,
+          tgt.labels,
+          edgeTypes,
+          edgeTypeMappings,
         );
+        customSchema = applicable[edge.name]?.schema;
+      }
+      const hasCustomAttributes = customSchema !== undefined;
+      if (hasCustomAttributes) typedCount++;
 
-        // Custom fact-type schema, when the edge's relation maps to one for its
-        // endpoint labels. Untyped edges get temporal-only enrichment.
-        let customSchema: z.ZodType | undefined = undefined;
-        if (edgeTypes && edgeTypeMappings) {
-          const src = idToNode.get(edge.sourceNodeId);
-          const tgt = idToNode.get(edge.targetNodeId);
-          if (!src || !tgt) {
-            throw new Error(
-              `enrichEdges: edge ${edge.id} endpoint missing from canonical nodes`,
-            );
-          }
-          const applicable = getApplicableEdgeTypes(
-            src.labels,
-            tgt.labels,
-            edgeTypes,
-            edgeTypeMappings,
-          );
-          customSchema = applicable[edge.name]?.schema;
-        }
-        const hasCustomAttributes = customSchema !== undefined;
-        if (hasCustomAttributes) typedCount++;
+      const result = await invokeStructured(
+        model,
+        buildEnrichEdgeSchema(customSchema),
+        buildEnrichEdgeMessages({
+          fact: edge.fact,
+          episode,
+          referenceTime,
+          existingAttributes: edge.attributes,
+          hasCustomAttributes,
+          coreferences,
+          labelChunks: chunksPerEpisode[source.episodeIndex].length > 1,
+        }),
+        {
+          callbacks: this.llmTracer.getCallbacks(ctx),
+          runName: 'enrich-edge',
+          tags: ['knowledge-graph', 'enrich.edge'],
+          validate: buildEnrichEdgeValidator(),
+        },
+      );
 
-        const result = await invokeStructured(
-          model,
-          buildEnrichEdgeSchema(customSchema),
-          buildEnrichEdgeMessages({
-            fact: edge.fact,
-            episode,
-            referenceTime,
-            existingAttributes: edge.attributes,
-            hasCustomAttributes,
-            coreferences,
-            labelChunks: chunksPerEpisode[source.episodeIndex].length > 1,
-          }),
-          {
-            callbacks: this.llmTracer.getCallbacks(ctx),
-            runName: 'enrich-edge',
-            tags: ['knowledge-graph', 'enrich.edge'],
-            validate: buildEnrichEdgeValidator(),
-          },
-        );
+      // ISO string validated at schema level
+      if (result.validAt) edge.validAt = new Date(result.validAt);
+      if (result.invalidAt) edge.invalidAt = new Date(result.invalidAt);
+      if (result.attributes) {
+        edge.attributes = { ...edge.attributes, ...result.attributes };
+      }
+    });
 
-        // ISO string validated at schema level
-        if (result.validAt) edge.validAt = new Date(result.validAt);
-        if (result.invalidAt) edge.invalidAt = new Date(result.invalidAt);
-        if (result.attributes) {
-          edge.attributes = { ...edge.attributes, ...result.attributes };
-        }
-      }),
-    );
-
+    if (concurrency) {
+      await withConcurrency(concurrency, tasks);
+    } else {
+      await Promise.all(tasks.map((task) => task()));
+    }
     return {
       metrics: {
         'new.count': newEdges.length,

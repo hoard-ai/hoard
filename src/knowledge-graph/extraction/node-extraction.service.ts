@@ -4,7 +4,6 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 
 import { Uuid, UuidSchema } from '@/common/schemas';
-import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { invokeStructured } from '@/llm';
 import {
   LLM_TRACER,
@@ -15,7 +14,7 @@ import {
   type SpanMetrics,
 } from '@/observability';
 
-import { withConcurrency } from '../batch-utils';
+import { CountingSemaphore, withConcurrency } from '../batch-utils';
 import type { EntityTypeMap } from '../episode/types';
 import { createEntityNode, EntityEdge, EntityNode, type EpisodicNode } from '../models';
 import {
@@ -54,10 +53,7 @@ function resolveLabels(
 
 @Injectable()
 export class NodeExtractionService {
-  constructor(
-    @Inject(LLM_TRACER) private readonly llmTracer: LlmTracer,
-    private readonly kgConfig: KnowledgeGraphConfigService,
-  ) {}
+  constructor(@Inject(LLM_TRACER) private readonly llmTracer: LlmTracer) {}
 
   async extractNodes(
     model: BaseChatModel,
@@ -239,6 +235,7 @@ export class NodeExtractionService {
     allEdges: EntityEdge[],
     entityTypes: EntityTypeMap | undefined,
     nodeContext: NodeEpisodeContext,
+    concurrency?: CountingSemaphore,
     ctx?: LlmContext,
   ): Promise<void> {
     await this.fillEntityAttributesImpl(
@@ -247,6 +244,7 @@ export class NodeExtractionService {
       allEdges,
       entityTypes,
       nodeContext,
+      concurrency,
       ctx,
     );
   }
@@ -258,6 +256,7 @@ export class NodeExtractionService {
     allEdges: EntityEdge[],
     entityTypes: EntityTypeMap | undefined,
     nodeContext: NodeEpisodeContext,
+    concurrency?: CountingSemaphore,
     ctx?: LlmContext,
   ): Promise<{ metrics: SpanMetrics }> {
     const baseMetrics: SpanMetrics = {
@@ -305,8 +304,12 @@ export class NodeExtractionService {
         node.attributes = { ...node.attributes, ...attrs };
       });
     }
-    await withConcurrency(this.kgConfig.memoryBackpressureConcurrencyLimit, tasks);
 
+    if (concurrency) {
+      await withConcurrency(concurrency, tasks);
+    } else {
+      await Promise.all(tasks.map((task) => task()));
+    }
     return { metrics: { ...baseMetrics, 'extracted.count': tasks.length } };
   }
 
@@ -316,9 +319,18 @@ export class NodeExtractionService {
     allEdges: EntityEdge[],
     entityTypes: EntityTypeMap | undefined,
     nodeContext: NodeEpisodeContext,
+    concurrency?: CountingSemaphore,
     ctx?: LlmContext,
   ): Promise<void> {
-    await this.summarizeNodesImpl(model, nodes, allEdges, entityTypes, nodeContext, ctx);
+    await this.summarizeNodesImpl(
+      model,
+      nodes,
+      allEdges,
+      entityTypes,
+      nodeContext,
+      concurrency,
+      ctx,
+    );
   }
 
   @Span('summarizeNodes', { onResult: metricsOnResult })
@@ -328,6 +340,7 @@ export class NodeExtractionService {
     allEdges: EntityEdge[],
     entityTypes: EntityTypeMap | undefined,
     nodeContext: NodeEpisodeContext,
+    concurrency?: CountingSemaphore,
     ctx?: LlmContext,
   ): Promise<{ metrics: SpanMetrics }> {
     if (nodes.length === 0) {
@@ -439,7 +452,11 @@ export class NodeExtractionService {
         });
       }
     }
-    await withConcurrency(this.kgConfig.memoryBackpressureConcurrencyLimit, tasks);
+    if (concurrency) {
+      await withConcurrency(concurrency, tasks);
+    } else {
+      await Promise.all(tasks.map((task) => task()));
+    }
 
     for (const node of nodes) {
       const summary = summaryMap.get(node.name);

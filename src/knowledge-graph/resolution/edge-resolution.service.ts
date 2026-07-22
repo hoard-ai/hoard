@@ -2,7 +2,6 @@ import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { Inject, Injectable } from '@nestjs/common';
 
 import type { Uuid } from '@/common/schemas';
-import { KnowledgeGraphConfigService } from '@/config/knowledge-graph';
 import { invokeStructured } from '@/llm';
 import {
   LLM_TRACER,
@@ -13,7 +12,7 @@ import {
   type SpanMetrics,
 } from '@/observability';
 
-import { compressIdMap, withConcurrency } from '../batch-utils';
+import { compressIdMap, CountingSemaphore, withConcurrency } from '../batch-utils';
 import { EntityEdge, EpisodicNode } from '../models';
 import {
   buildDedupeEdgesMessages,
@@ -38,7 +37,6 @@ export class EdgeResolutionService {
   constructor(
     private readonly edgeRepo: EntityEdgeRepository,
     @Inject(LLM_TRACER) private readonly llmTracer: LlmTracer,
-    private readonly kgConfig: KnowledgeGraphConfigService,
   ) {}
 
   /* Builds a synthetic episode whose content is scoped to the chunks the edge
@@ -442,6 +440,7 @@ export class EdgeResolutionService {
     chunkSources: EdgeChunkSources,
     previousEpisodesPerEpisode: EpisodicNode[][],
     customInstructions?: string,
+    concurrency?: CountingSemaphore,
     ctx?: LlmContext,
   ): Promise<EntityEdge[]> {
     return this.dedupeAcrossBatchImpl(
@@ -452,6 +451,7 @@ export class EdgeResolutionService {
       chunkSources,
       previousEpisodesPerEpisode,
       customInstructions,
+      concurrency,
       ctx,
     ).then((r) => r.canonicalEdges);
   }
@@ -465,6 +465,7 @@ export class EdgeResolutionService {
     chunkSources: EdgeChunkSources,
     previousEpisodesPerEpisode: EpisodicNode[][],
     customInstructions: string | undefined,
+    concurrency: CountingSemaphore | undefined,
     ctx: LlmContext | undefined,
   ): Promise<{ canonicalEdges: EntityEdge[]; metrics: SpanMetrics }> {
     const allEdges = edgesPerEpisode.flat();
@@ -523,36 +524,36 @@ export class EdgeResolutionService {
       });
     }
 
-    const pairResults = await withConcurrency(
-      this.kgConfig.memoryBackpressureConcurrencyLimit,
-      tasks.map((t) => async (): Promise<[Uuid, Uuid][]> => {
-        const ownerIdx = edgeOwner.get(t.edge.id)!;
-        const { dedupe, idxToEdge } = await this.dedupeEdgeViaLlm(
-          model,
-          t.edge,
-          t.endpointEdges,
-          t.similarEdges,
-          this.episodeForChunks(episodes, chunksPerEpisode, chunkSources, t.edge.id),
-          previousEpisodesPerEpisode[ownerIdx],
-          episodes[ownerIdx].validAt,
-          customInstructions,
-          ctx,
-        );
-        // Only endpoint-range indices (same + reversed) count as duplicates.
-        // The similar-topic section is for contradictions; accepting duplicates
-        // from it would collapse edges with different endpoints. Matches the
-        // guard in `dedupeEdges` and upstream `dedupe_edges_bulk` semantics
-        // (bulk_utils.py:521-524) which never surfaces non-endpoint duplicates.
-        const endpointCount = t.endpointEdges.length;
-        const localPairs: [Uuid, Uuid][] = [];
-        for (const idx of dedupe.duplicateFacts) {
-          if (idx >= endpointCount) continue;
-          const peer = idxToEdge.get(idx);
-          if (peer) localPairs.push([t.edge.id, peer.id]);
-        }
-        return localPairs;
-      }),
-    );
+    const pairTasks = tasks.map((t) => async (): Promise<[Uuid, Uuid][]> => {
+      const ownerIdx = edgeOwner.get(t.edge.id)!;
+      const { dedupe, idxToEdge } = await this.dedupeEdgeViaLlm(
+        model,
+        t.edge,
+        t.endpointEdges,
+        t.similarEdges,
+        this.episodeForChunks(episodes, chunksPerEpisode, chunkSources, t.edge.id),
+        previousEpisodesPerEpisode[ownerIdx],
+        episodes[ownerIdx].validAt,
+        customInstructions,
+        ctx,
+      );
+      // Only endpoint-range indices (same + reversed) count as duplicates.
+      // The similar-topic section is for contradictions; accepting duplicates
+      // from it would collapse edges with different endpoints. Matches the
+      // guard in `dedupeEdges` and upstream `dedupe_edges_bulk` semantics
+      // (bulk_utils.py:521-524) which never surfaces non-endpoint duplicates.
+      const endpointCount = t.endpointEdges.length;
+      const localPairs: [Uuid, Uuid][] = [];
+      for (const idx of dedupe.duplicateFacts) {
+        if (idx >= endpointCount) continue;
+        const peer = idxToEdge.get(idx);
+        if (peer) localPairs.push([t.edge.id, peer.id]);
+      }
+      return localPairs;
+    });
+    const pairResults = concurrency
+      ? await withConcurrency(concurrency, pairTasks)
+      : await Promise.all(pairTasks.map((task) => task()));
 
     const duplicatePairs = pairResults.flat();
     if (duplicatePairs.length === 0) {

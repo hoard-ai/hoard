@@ -27,9 +27,8 @@ export const EntityCorefDescriptorSchema = z.object({
     .default([])
     .describe(
       'Distinctive surface forms this text uses for the entity: name variants and ' +
-        'definite descriptions (e.g. "Dr. Osei", "the lead researcher"). Excludes ' +
-        'bare pronouns (he, she, they, it, this, that), which do not identify the ' +
-        'entity elsewhere. Omit when necessary.',
+        'definite descriptions (e.g. "Dr. Osei", "the lead researcher"). NEVER ' +
+        'bare pronouns (he, she, they, it, this, that). Omit when none present.',
     ),
   referredToAsPronouns: z
     .array(z.string().trim().min(1))
@@ -37,7 +36,7 @@ export const EntityCorefDescriptorSchema = z.object({
     .describe(
       'Pronouns this text itself uses for the entity, in subject form (e.g. "he", ' +
         '"she", "it", "they"). Observed usage only - never inferred from the entity ' +
-        'name or type. Omit when necessary.',
+        'name or type. Omit when none present.',
     ),
 });
 export type EntityCorefDescriptor = z.infer<typeof EntityCorefDescriptorSchema>;

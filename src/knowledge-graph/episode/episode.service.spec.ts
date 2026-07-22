@@ -21,6 +21,7 @@ import {
   u,
 } from '@/test/factories';
 
+import { CountingSemaphore } from '../batch-utils';
 import { CommunityMaintenanceService } from '../community';
 import { EmbeddingService } from '../embedding';
 import { EdgeExtractionService, NodeExtractionService } from '../extraction';
@@ -205,7 +206,13 @@ describe('EpisodeService', () => {
       const embedded = { ...extracted, nameEmbedding: [1, 0, 0] };
 
       mockNodeExtraction.extractNodes.mockResolvedValue(nodesResult([extracted]));
-      mockEmbeddingService.embedNodes.mockResolvedValue([embedded]);
+      // embedNodes fills nameEmbedding in place (the return value is unused).
+      mockEmbeddingService.embedNodes.mockImplementation((nodes) => {
+        nodes.forEach((n) => {
+          n.nameEmbedding = [1, 0, 0];
+        });
+        return Promise.resolve(nodes);
+      });
 
       await service.addTextEpisodes({
         userId: KG_TEST_USER_ID,
@@ -302,7 +309,13 @@ describe('EpisodeService', () => {
       const embeddedEdge = { ...edge, factEmbedding: [1, 0, 0] };
 
       mockEdgeExtraction.extractEdges.mockResolvedValue(edgesResult([edge]));
-      mockEmbeddingService.embedEdges.mockResolvedValue([embeddedEdge]);
+      // embedEdges fills factEmbedding in place (the return value is unused).
+      mockEmbeddingService.embedEdges.mockImplementation((edges) => {
+        edges.forEach((e) => {
+          e.factEmbedding = [1, 0, 0];
+        });
+        return Promise.resolve(edges);
+      });
 
       await service.addTextEpisodes({
         userId: KG_TEST_USER_ID,
@@ -355,7 +368,8 @@ describe('EpisodeService', () => {
         undefined,
         undefined,
         expect.any(Array), // committedCorefBindingsPerEpisode
-        expect.anything(),
+        expect.any(CountingSemaphore), // shared backpressure budget
+        expect.anything(), // ctx
       );
       expect(mockEdgeResolution.invalidateEdges).toHaveBeenCalledWith(
         [embeddedEdge],

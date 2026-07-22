@@ -107,13 +107,10 @@ export class EmbeddingService {
     }
 
     const vectors = await this.embed(toEmbed.map((n) => n.name));
-
-    let vectorIdx = 0;
-    const out = nodes.map((n) => {
-      if (n.nameEmbedding !== null) return n;
-      return { ...n, nameEmbedding: vectors[vectorIdx++] };
+    toEmbed.forEach((n, i) => {
+      n.nameEmbedding = vectors[i];
     });
-    return { nodes: out, metrics: { count: toEmbed.length, model: this.modelName } };
+    return { nodes, metrics: { count: toEmbed.length, model: this.modelName } };
   }
 
   async embedText(text: string): Promise<number[] | null> {
@@ -151,12 +148,9 @@ export class EmbeddingService {
     }
 
     const vectors = await this.embed(toEmbed.map((e) => e.fact));
-
-    let vectorIdx = 0;
-    const out = edges.map((e) => {
-      if (e.factEmbedding !== null) return e;
-      return { ...e, factEmbedding: vectors[vectorIdx++] };
+    toEmbed.forEach((e, i) => {
+      e.factEmbedding = vectors[i];
     });
-    return { edges: out, metrics: { count: toEmbed.length, model: this.modelName } };
+    return { edges, metrics: { count: toEmbed.length, model: this.modelName } };
   }
 }
